@@ -6,6 +6,13 @@ resources:
   - secrets.yaml
 patches:
   - target:
+      kind: ConfigMap
+      name: xscope-config
+    patch: |-
+      - op: replace
+        path: /data/XSCOPE_AUTO_JOIN_DEFAULT_TENANT
+        value: "true"
+  - target:
       kind: Service
       name: keycloak
     patch: |-

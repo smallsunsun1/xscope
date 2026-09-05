@@ -5,7 +5,18 @@ metadata:
   namespace: xscope-system
 spec:
   selector: { app.kubernetes.io/name: control-plane }
-  ports: [{ name: http, port: 8081, targetPort: http }]
+  ports:
+    - { name: http, port: 8081, targetPort: http }
+    - { name: internal, port: 8084, targetPort: internal }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-agent
+  namespace: xscope-system
+spec:
+  selector: { app.kubernetes.io/name: cluster-agent }
+  ports: [{ name: http, port: 8083, targetPort: http }]
 ---
 apiVersion: v1
 kind: Service

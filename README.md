@@ -6,8 +6,10 @@ XScope 是一个面向大模型 API 的云原生服务平台。源码按语言�
 
 | 目录 | 工具链 | 职责 |
 | --- | --- | --- |
-| `rust/gateway` | Cargo workspace、Pingora 0.8、rules_rust | 鉴权、加权路由、健康检查、HTTP 代理、usage WAL |
-| `go/control-plane` | Go module、chi、validator、rules_go | 项目/API Key、模型目录、报价和管理 API |
+| `rust/gateway` | Cargo workspace、Pingora 0.8、Redis、rules_rust | 鉴权、全局 RPM/TPM、加权路由、HTTP 代理、usage WAL |
+| `rust/services/control-plane` | Axum、SeaORM、PostgreSQL、rules_rust | 身份/租户、项目/API Key、计量、订单、支付退款、账本、发票和管理 API |
+| `rust/crates/{domain,entities,migration}` | Rust workspace、SeaORM 2 | 业务领域、数据库实体和版本化迁移 |
+| `go/cluster-agent` | Go module、chi、controller-runtime、rules_go | 控制面与成员 Kubernetes 集群之间的窄权限 API |
 | `go/operator` | controller-runtime、Kubernetes API | 将 `ModelDeployment` 协调为 Deployment/Service 并回写状态 |
 | `go/api` | Kubernetes API types | `platform.xscope.io/v1alpha1` 类型定义 |
 | `python` | pyproject、FastAPI、Pydantic | OpenAI Chat Completions 开发 runtime |
@@ -18,21 +20,15 @@ XScope 是一个面向大模型 API 的云原生服务平台。源码按语言�
 
 ## 开发
 
-要求 Bazel 9、Rust 1.85+、Go 1.26+、Python 3.12+ 和 uv。Pingora 的本机构建还需要 Clang；所选 rustls feature 不要求 OpenSSL 运行时。Web 使用 Bazel 下载的 Node/pnpm 工具链，不要求全局 Node 可用。
+构建入口统一为 Bazel 9.2.0；各语言工具链由 Bazel 下载。macOS 本机构建需要系统 C/C++ 工具链。部署镜像在 Linux Bazel 构建环境中通过 rules_oci 产出，Docker 只负责运行构建环境和导入镜像归档。
 
 ```bash
 # 整个 monorepo
 bazel build //...
 bazel test //...
 
-# 各语言原生反馈环（IDE 与局部开发）
-(cd rust && cargo test --workspace)
-
-# Go
-(cd go && go test ./...)
-
-# Python
-(cd python && uv sync --extra dev && uv run pytest)
+# 局部测试也使用 Bazel
+bazel test //rust/... //go/... //python:runtime_test
 
 # Web：安装 IDE 可见的 node_modules、检查并构建可部署产物
 bazel run -- @pnpm//:pnpm --dir "$PWD/web" install --frozen-lockfile
@@ -48,12 +44,12 @@ bazel run -- @pnpm//:pnpm --dir "$PWD/web" install --lockfile-only
 
 ### 管理控制台
 
-初版控制台包含平台总览、项目、API Key、模型/价格、费用估算和 Kubernetes `ModelDeployment` 管理。页面通过 Vite 代理连接本地组件；控制面未连接集群或 CRD 未安装时，部署页会进入只读保护态，其余管理功能仍可使用。
+控制台包含平台总览、项目、API Key 的 RPM/TPM/模型/预算策略、模型价格、用量、余额门禁、充值订单、支付退款、双分录账本、发票、对账，以及 Kubernetes `ModelDeployment` 管理。控制面未连接成员集群或 CRD 未安装时，部署页会进入只读保护态，其余管理功能仍可使用。
 
 分别启动控制面和前端开发服务器：
 
 ```bash
-cd go && go run ./control-plane/cmd/server
+bazel run //rust/services/control-plane
 
 # 在仓库根目录的另一个终端
 bazel run -- @pnpm//:pnpm --dir "$PWD/web" dev
@@ -64,12 +60,11 @@ bazel run -- @pnpm//:pnpm --dir "$PWD/web" dev
 启动开发 runtime 后，用 JSON 注入网关 Key 和 endpoint：
 
 ```bash
-cd python && uv run xscope-runtime
+bazel run //python:runtime
 
-cd rust
 XSCOPE_API_KEYS_JSON='[{"id":"key-local","tenant_id":"tenant-local","project_id":"project-local","secret":"xscope-local-secret"}]' \
 XSCOPE_UPSTREAMS_JSON='[{"id":"runtime-dev","address":"127.0.0.1:8090","weight":100}]' \
-cargo run -p xscope-gateway
+bazel run //rust/gateway
 
 curl http://127.0.0.1:8080/v1/chat/completions \
   # Authorization credentials are supplied from a runtime secret.
@@ -77,7 +72,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"xscope-demo","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-Pingora 在内存中只保留 Key 的 SHA-256 摘要，并在请求进入时做常量时间比较。已鉴权请求的 usage 通过 Serde 写入 append-only WAL；本地默认路径为 `/tmp/xscope-usage-v1.jsonl`。生产密钥应通过 Secret 或后续的签名配置快照下发。
+Pingora 在内存中只保留 Key 的 SHA-256 摘要，并校验 Scope、允许模型、过期时间、月预算和预付余额。网关从控制面的内部接口轮询策略并原子替换 last-known-good 快照；静态 Key 仅作为启动回退。多网关副本通过 Redis Lua 原子预占 RPM/TPM，并在响应后按真实 token 回补。通过策略校验的请求会先把 usage 写入 append-only WAL，再异步上报；Kubernetes 部署中的 WAL 位于持久卷 `/var/lib/xscope/usage-wal/events.jsonl`。Rust 控制面通过 SeaORM 以 `event_id` 幂等写入 PostgreSQL，并生成精确到微分单位的双分录。
 
 Kubernetes Secret 的 `keys.json` 字段使用同一个 JSON 格式：
 
@@ -89,21 +84,28 @@ kubectl -n xscope-system create secret generic xscope-gateway-keys \
 ### Docker Desktop 一键部署
 
 本地 overlay 会把管理面和数据面共同部署到当前 `kubectl` context，常驻 CPU request
-约为 155m（不包含用户创建的模型工作负载）。控制台由 OAuth2 Proxy 保护，账号由
-Keycloak 管理并持久化到 PostgreSQL；前端静态文件由控制面进程直接提供，减少一个
+约为 175m（不包含用户创建的模型工作负载）。控制台由 OAuth2 Proxy 保护，账号由
+Keycloak 完成 OIDC 登录，Rust 控制面把平台用户、租户成员关系、项目、Key、用量和财务账本通过 SeaORM 持久化到 PostgreSQL；前端静态文件由控制面进程直接提供，减少一个
 常驻 Pod。
 
 ```bash
 ./tools/deploy-local.sh
+
+# 仅编译和打包 Linux OCI 镜像（不更新集群）
+./tools/bazel-linux.sh images
 
 # 控制台 / 身份服务 / 推理入口
 open http://localhost:30081
 open http://xscope.localhost:30080
 curl http://localhost:30082/healthz
 
-# 查看运行状态与 Rust 网关结构化日志
+# 登录后可直接查看实际用量与费用
+open http://localhost:30081/#/billing
+
+# 查看运行状态与 Rust 服务结构化日志
 kubectl get pods -n xscope-system -w
 kubectl logs -n xscope-system deployment/gateway -f
+kubectl logs -n xscope-system deployment/control-plane -f
 ```
 
 Docker Desktop 本地初始凭据仅用于开发：控制台用户 `platform-admin` / `xscope-local-admin`，
@@ -121,16 +123,16 @@ target 过滤规则，并通过 `XSCOPE_LOG_FORMAT=compact|json` 选择输出格
 Operator 必须运行在集群内或具备有效 kubeconfig：
 
 ```bash
-cd go && go run ./operator/cmd/operator
+bazel run //go/operator/cmd/operator
 ```
 
 ## 垂直切片进度
 
-1. 已完成：项目/API Key 管理、模型目录和报价、Ant Design 管理台、Pingora Key 认证/加权 endpoint/健康检查、OpenAI 非流式请求代理和 usage WAL。
-2. 已完成：控制面创建/扩缩/删除 `ModelDeployment`，以及 Operator 创建 Deployment/Service 并回写 readiness。
-3. 下一步：持久化组织/RBAC/项目/Key，并向网关发布签名配置快照。
-4. 下一步：本地/Redis 配额预占、SSE 流式代理，以及把 WAL 可靠转发到 Kafka/Redpanda。
-5. 下一步：计量消费者去重并聚合到账单账本；Operator 补 HPA/PDB/NetworkPolicy。
+1. 已完成：Rust/Axum/SeaORM 控制面、PostgreSQL 账号与租户成员、项目/API Key、模型目录和报价，以及 Ant Design 管理台。
+2. 已完成：Rust 控制面经 Go cluster-agent 创建/扩缩/删除 `ModelDeployment`；Go Operator 只负责 Kubernetes reconcile。
+3. 已完成初版：Pingora 执行 Scope、模型、过期、月预算、余额门禁；Redis Lua 在所有网关副本间执行 RPM/TPM 预占与结算。
+4. 已完成初版：usage 持久化 WAL、至少一次上报、数据库幂等去重、精确费用、充值/支付/退款、双分录、发票记录和渠道对账。
+5. 按顺序推进：SSE/取消 → InferencePool/llm-d EPP → RoutePolicy/stable-canary → HPA/PDB/资源所有权 → 计费预占/WAL checkpoint/事件流 → 多集群 → 可观测性/审计 → 正式支付税务与更多推理 API。验收状态见 `docs/implementation-sequence.md`。
 
 ## 工程约定
 

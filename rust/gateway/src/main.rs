@@ -8,9 +8,10 @@ use pingora_load_balancing::discovery::Static;
 use pingora_load_balancing::health_check::TcpHealthCheck;
 use pingora_load_balancing::{Backend, Backends, LoadBalancer, selection::RoundRobin};
 use pingora_proxy::http_proxy_service;
-use xscope_gateway::auth::KeySet;
+use xscope_gateway::auth::DynamicKeySet;
 use xscope_gateway::config::Settings;
 use xscope_gateway::proxy::Gateway;
+use xscope_gateway::quota::QuotaManager;
 use xscope_gateway::usage::UsageSink;
 
 fn main() {
@@ -44,12 +45,23 @@ fn init_tracing() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     let settings = Settings::from_env()?;
-    let keys = KeySet::new(&settings.api_keys);
+    let keys = DynamicKeySet::new(&settings.api_keys);
     if keys.is_empty() {
         tracing::warn!(
             config = "XSCOPE_API_KEYS_JSON",
             "API key configuration is empty; readiness and inference will fail closed"
         );
+    }
+    keys.spawn_refresh(
+        settings.control_internal_url.clone(),
+        settings.internal_token.clone(),
+        Duration::from_secs(settings.policy_refresh_seconds),
+    );
+    let quota = QuotaManager::new(&settings.redis_url);
+    if quota.is_distributed() {
+        tracing::info!("Redis-backed distributed RPM/TPM quota is enabled");
+    } else {
+        tracing::warn!("Redis quota is disabled; using per-process RPM fallback without TPM");
     }
 
     let mut backends = BTreeSet::new();
@@ -74,11 +86,21 @@ fn run() -> Result<(), Box<dyn Error>> {
         settings.region,
         settings.model_revision,
         settings.price_version,
+        if settings.control_internal_url.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{}/usage-events",
+                settings.control_internal_url.trim_end_matches('/')
+            )
+        },
+        settings.internal_token,
     )?;
     let gateway = Gateway {
         upstreams: background.task(),
         endpoint_by_address,
         keys,
+        quota,
         usage,
     };
 

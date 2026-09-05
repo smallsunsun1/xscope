@@ -6,20 +6,27 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+arc-swap.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+dashmap.workspace = true
 http.workspace = true
 pingora-core.workspace = true
 pingora-error.workspace = true
 pingora-http.workspace = true
 pingora-load-balancing.workspace = true
 pingora-proxy.workspace = true
+redis.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
+tiktoken-rs.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

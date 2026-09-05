@@ -11,8 +11,9 @@ use pingora_load_balancing::{LoadBalancer, selection::RoundRobin};
 use pingora_proxy::{ProxyHttp, Session};
 use serde::Deserialize;
 
-use crate::auth::{KeySet, Principal};
+use crate::auth::{DynamicKeySet, Principal};
 use crate::config::UpstreamConfig;
+use crate::quota::{QuotaDecision, QuotaDenial, QuotaManager, QuotaReservation};
 use crate::usage::{CompletionResponse, UsageRecord, UsageSink};
 
 const MAX_CAPTURE_BYTES: usize = 1 << 20;
@@ -20,7 +21,8 @@ const MAX_CAPTURE_BYTES: usize = 1 << 20;
 pub struct Gateway {
     pub upstreams: Arc<LoadBalancer<RoundRobin>>,
     pub endpoint_by_address: HashMap<String, UpstreamConfig>,
-    pub keys: KeySet,
+    pub keys: Arc<DynamicKeySet>,
+    pub quota: Arc<QuotaManager>,
     pub usage: UsageSink,
 }
 
@@ -33,6 +35,8 @@ pub struct RequestContext {
     request_body: Vec<u8>,
     response_body: Vec<u8>,
     response_status: u16,
+    meterable: bool,
+    quota_reservation: Option<QuotaReservation>,
     usage_emitted: bool,
 }
 
@@ -47,6 +51,8 @@ impl Default for RequestContext {
             request_body: Vec::new(),
             response_body: Vec::new(),
             response_status: 0,
+            meterable: false,
+            quota_reservation: None,
             usage_emitted: false,
         }
     }
@@ -55,6 +61,9 @@ impl Default for RequestContext {
 #[derive(Deserialize)]
 struct ModelRequest {
     model: String,
+    messages: serde_json::Value,
+    max_tokens: Option<u64>,
+    max_completion_tokens: Option<u64>,
 }
 
 #[async_trait]
@@ -130,6 +139,30 @@ impl ProxyHttp for Gateway {
             }), &ctx.request_id).await?;
             return Ok(true);
         };
+        if !principal.has_scope("chat.completions") {
+            respond_json(session, 403, serde_json::json!({
+                "error":{"code":"insufficient_scope","message":"API key does not allow chat completions"}
+            }), &ctx.request_id).await?;
+            return Ok(true);
+        }
+        if principal.budget_exhausted() {
+            respond_json(session, 402, serde_json::json!({
+                "error":{"code":"budget_exhausted","message":"API key monthly budget is exhausted"}
+            }), &ctx.request_id).await?;
+            return Ok(true);
+        }
+        if principal.funds_exhausted() {
+            respond_json(session, 402, serde_json::json!({
+                "error":{"code":"insufficient_balance","message":"the project's prepaid balance is exhausted"}
+            }), &ctx.request_id).await?;
+            return Ok(true);
+        }
+        if !self.quota.is_distributed() && !self.keys.check_rate_limit(&principal) {
+            respond_json(session, 429, serde_json::json!({
+                "error":{"code":"rate_limit_exceeded","message":"API key request-per-minute limit exceeded"}
+            }), &ctx.request_id).await?;
+            return Ok(true);
+        }
         ctx.principal = Some(principal);
         Ok(false)
     }
@@ -151,9 +184,47 @@ impl ProxyHttp for Gateway {
             ctx.request_body.extend_from_slice(chunk);
         }
         if end_of_stream {
-            if let Ok(request) = serde_json::from_slice::<ModelRequest>(&ctx.request_body) {
-                ctx.model_id = request.model;
+            let request =
+                serde_json::from_slice::<ModelRequest>(&ctx.request_body).map_err(|error| {
+                    Error::because(ErrorType::HTTPStatus(400), "invalid request body", error)
+                })?;
+            let principal = ctx.principal.as_ref().ok_or_else(|| {
+                Error::explain(ErrorType::HTTPStatus(401), "request principal is missing")
+            })?;
+            if !principal.allows_model(&request.model) {
+                return Err(Error::explain(
+                    ErrorType::HTTPStatus(403),
+                    "API key does not allow the requested model",
+                ));
             }
+            let requested_tokens = estimate_reserved_tokens(&request);
+            match self.quota.reserve(principal, requested_tokens).await {
+                Ok(Some(QuotaDecision::Allowed(reservation))) => {
+                    ctx.quota_reservation = Some(reservation);
+                }
+                Ok(Some(QuotaDecision::Denied(QuotaDenial::RequestsPerMinute))) => {
+                    return Err(Error::explain(
+                        ErrorType::HTTPStatus(429),
+                        "API key distributed RPM limit exceeded",
+                    ));
+                }
+                Ok(Some(QuotaDecision::Denied(QuotaDenial::TokensPerMinute))) => {
+                    return Err(Error::explain(
+                        ErrorType::HTTPStatus(429),
+                        "API key distributed TPM limit exceeded",
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(%error, request_id = %ctx.request_id, "distributed quota unavailable");
+                    return Err(Error::explain(
+                        ErrorType::HTTPStatus(503),
+                        "distributed quota service unavailable",
+                    ));
+                }
+            }
+            ctx.model_id = request.model;
+            ctx.meterable = true;
         }
         Ok(())
     }
@@ -217,10 +288,10 @@ impl ProxyHttp for Gateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        if let Some(chunk) = body {
-            if ctx.response_body.len() + chunk.len() <= MAX_CAPTURE_BYTES {
-                ctx.response_body.extend_from_slice(chunk);
-            }
+        if let Some(chunk) = body
+            && ctx.response_body.len() + chunk.len() <= MAX_CAPTURE_BYTES
+        {
+            ctx.response_body.extend_from_slice(chunk);
         }
         if end_of_stream {
             self.emit_usage(ctx, None)?;
@@ -229,12 +300,29 @@ impl ProxyHttp for Gateway {
     }
 
     async fn logging(&self, _session: &mut Session, error: Option<&Error>, ctx: &mut Self::CTX) {
-        if !ctx.usage_emitted {
-            if let Err(record_error) = self.emit_usage(ctx, error) {
-                tracing::error!(
-                    error = %record_error,
+        if !ctx.usage_emitted
+            && let Err(record_error) = self.emit_usage(ctx, error)
+        {
+            tracing::error!(
+                error = %record_error,
+                request_id = %ctx.request_id,
+                "usage WAL write failed"
+            );
+        }
+        if let Some(reservation) = ctx.quota_reservation.take() {
+            let actual_tokens = serde_json::from_slice::<CompletionResponse>(&ctx.response_body)
+                .map(|response| {
+                    response
+                        .usage
+                        .prompt_tokens
+                        .saturating_add(response.usage.completion_tokens)
+                })
+                .unwrap_or_default();
+            if let Err(quota_error) = self.quota.settle(reservation, actual_tokens).await {
+                tracing::warn!(
+                    error = %quota_error,
                     request_id = %ctx.request_id,
-                    "usage WAL write failed"
+                    "could not settle distributed token reservation"
                 );
             }
         }
@@ -248,15 +336,31 @@ impl ProxyHttp for Gateway {
     }
 }
 
+fn estimate_reserved_tokens(request: &ModelRequest) -> u64 {
+    let message_text = serde_json::to_string(&request.messages).unwrap_or_default();
+    let prompt_tokens = tiktoken_rs::cl100k_base_singleton()
+        .encode_ordinary(&message_text)
+        .len()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let completion_tokens = request
+        .max_completion_tokens
+        .or(request.max_tokens)
+        .unwrap_or(1_024);
+    prompt_tokens
+        .saturating_add(completion_tokens)
+        .min(10_000_000_001)
+}
+
 impl Gateway {
     fn emit_usage(&self, ctx: &mut RequestContext, error: Option<&Error>) -> Result<()> {
+        if !ctx.meterable {
+            return Ok(());
+        }
         let Some(principal) = ctx.principal.as_ref() else {
             return Ok(());
         };
         let completion = serde_json::from_slice::<CompletionResponse>(&ctx.response_body).ok();
-        if let Some(response) = completion.as_ref() {
-            ctx.model_id.clone_from(&response.model);
-        }
         let (input_tokens, output_tokens) = completion
             .map(|response| {
                 (

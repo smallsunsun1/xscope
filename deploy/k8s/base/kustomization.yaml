@@ -6,6 +6,7 @@ resources:
   - database.yaml
   - identity.yaml
   - networkpolicy.yaml
+  - quota.yaml
   - rbac.yaml
   - workloads.yaml
   - services.yaml

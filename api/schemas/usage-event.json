@@ -11,12 +11,14 @@
     "occurred_at",
     "tenant_id",
     "project_id",
+    "api_key_id",
     "model_id",
     "model_revision",
     "region",
     "price_version",
     "input_tokens",
     "output_tokens",
+    "latency_ms",
     "status"
   ],
   "properties": {
@@ -41,4 +43,3 @@
     "labels": { "type": "object", "additionalProperties": { "type": "string" } }
   }
 }
-

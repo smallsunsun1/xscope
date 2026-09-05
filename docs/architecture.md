@@ -13,7 +13,7 @@
                          │                                        │
                          ▼                                        ▼
                  ┌──────────────┐                        ┌──────────────┐
-                 │ Control API  │                        │ Rust Gateway │
+                 │ Rust Control │                        │ Rust Gateway │
                  │ accounts/RBAC│                        │ auth / quota │
                  │ catalog/bill │                        │ route / proxy│
                  └──────┬───────┘                        └───┬──────┬───┘
@@ -21,8 +21,13 @@
               PostgreSQL│                                    │      ▼
                         ▼                                    │  Kafka/Redpanda
                  ┌──────────────┐                             │      │
-                 │ K8s Operator │                             │      ▼
-                 │ CRD reconcile│                             │ meter/ledger
+                 │ Go Cluster   │                             │      ▼
+                 │ Agent        │                             │ meter/ledger
+                 └──────┬───────┘                             │
+                        ▼                                     │
+                 ┌──────────────┐                             │
+                 │ Go Operator  │                             │
+                 │ CRD reconcile│                             │
                  └──────┬───────┘                             │
                         ▼                                     ▼
                 K8s workloads ◄──── service discovery ── model backends
@@ -48,7 +53,7 @@
 - **Quota & policy**：RPM/TPM/并发/日额度、允许模型、内容安全策略、地域和数据保留策略。
 - **Billing**：预付余额或后付信用额度、用量聚合、双分录账本、账单、支付/退款、发票。账本和原始用量事件应可重放、可对账。
 - **Deployment**：模型制品、运行时、GPU 规格、副本和自动扩缩策略，输出 `ModelDeployment` 期望状态。
-- **Config distribution**：将签名、版本化的路由/策略快照推送给网关；网关保留 last-known-good。
+- **Config distribution**：本地初版通过服务身份认证接口发布 Key 策略，网关原子更新并保留 last-known-good；生产多集群演进为签名、版本化的推送/拉取快照。
 
 ### 平台支撑（容易漏掉但必须设计）
 
@@ -88,8 +93,8 @@
 ## 7. 代码组织与语言分工
 
 - 根目录：Bazel/Bzlmod 统一构建、测试与后续镜像产出；语言 manifest 和 lockfile 是依赖解析输入。
-- `rust/`：Cargo workspace + rules_rust crate_universe；Pingora 承担连接池、HTTP 代理、健康检查和负载均衡，XScope filter 承担鉴权、策略与 usage。
-- `go/`：单一 Go module + rules_go/Gazelle；业务控制面使用 chi，Operator 使用 controller-runtime 和 Kubernetes 原生 API。
+- `rust/`：Cargo workspace + rules_rust crate_universe；Axum/SeaORM 承担全部业务控制面和 PostgreSQL 访问，Pingora 承担连接池、HTTP 代理、健康检查、鉴权、Redis 配额与 usage。
+- `go/`：单一 Go module + rules_go/Gazelle；只保留 cluster-agent、CRD 类型与 Operator，使用 controller-runtime 和 Kubernetes 原生 API，不承载账号、财务或订单逻辑。
 - `python/`：pyproject/src layout + rules_python；FastAPI、Pydantic 承担协议校验和开发 runtime。
 - TypeScript：Web 控制台与可选 Node SDK。
 
@@ -98,7 +103,7 @@
 ## 8. 交付阶段
 
 - **M0（已完成）**：按语言组织的原生工作区、契约、健康检查、CRD。
-- **M1（进行中）**：项目/API Key → Pingora 网关认证 → FastAPI backend → usage WAL；待补计量账本。
-- **M2（进行中）**：已完成 Operator 基础 reconcile 和 Ant Design 控制台；待接入真实 vLLM、Redis 配额、Kafka 与 PostgreSQL。
-- **M3**：多集群路由、灰度、自动扩缩、支付/账单、审计与 SLO。
+- **M1（已完成初版）**：PostgreSQL 项目/API Key → 动态策略快照 → Pingora 细粒度鉴权 → FastAPI backend → 持久化 usage WAL → 幂等用量表/费用汇总。
+- **M2（已完成初版）**：Operator/cluster-agent、Ant Design 控制台、Redis 全局 RPM/TPM、预付余额、订单/支付退款、双分录、发票记录与对账。
+- **M3**：多集群签名期望状态、header 灰度路由、llm-d/KServe KV-aware 调度、自动扩缩、正式支付/税务发票、审计与 SLO。
 - **M4**：企业 SSO、数据驻留、batch/fine-tune、市场化模型接入与成本优化。

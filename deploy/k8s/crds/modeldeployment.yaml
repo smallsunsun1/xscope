@@ -79,7 +79,11 @@ spec:
                 rollout:
                   type: object
                   properties:
-                    strategy: { type: string, enum: [rolling, canary, blueGreen], default: rolling }
+                    strategy:
+                      type: string
+                      enum: [rolling]
+                      default: rolling
+                      description: Canary and blue/green require the planned revision-routing API.
                     canaryWeight: { type: integer, minimum: 0, maximum: 100 }
                 nodeSelector:
                   type: object

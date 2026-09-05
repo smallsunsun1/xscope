@@ -12,6 +12,10 @@ pub struct Settings {
     pub usage_wal: String,
     pub api_keys: Vec<ApiKeyConfig>,
     pub upstreams: Vec<UpstreamConfig>,
+    pub control_internal_url: String,
+    pub internal_token: String,
+    pub policy_refresh_seconds: u64,
+    pub redis_url: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -81,6 +85,13 @@ impl Settings {
             usage_wal: env_or("XSCOPE_USAGE_WAL", "/tmp/xscope-usage-v1.jsonl"),
             api_keys,
             upstreams,
+            control_internal_url: env_or("XSCOPE_CONTROL_INTERNAL_URL", ""),
+            internal_token: env_or("XSCOPE_INTERNAL_TOKEN", ""),
+            policy_refresh_seconds: env_or("XSCOPE_POLICY_REFRESH_SECONDS", "5")
+                .parse()
+                .unwrap_or(5)
+                .max(1),
+            redis_url: env_or("XSCOPE_REDIS_URL", ""),
         })
     }
 }

@@ -5,11 +5,20 @@ metadata:
   namespace: xscope-system
 data:
   XSCOPE_CONTROL_ADDRESS: "0.0.0.0:8081"
+  XSCOPE_CONTROL_INTERNAL_ADDRESS: "0.0.0.0:8084"
   XSCOPE_CONSOLE_AUTH: "trusted-headers"
   XSCOPE_CONSOLE_DIR: "/srv/console"
+  XSCOPE_DEFAULT_TENANT_ID: "tenant-local"
+  XSCOPE_AUTO_JOIN_DEFAULT_TENANT: "false"
+  XSCOPE_BOOTSTRAP_ADMIN_USERS: "platform-admin"
   XSCOPE_CLUSTER_ID: "docker-desktop"
+  XSCOPE_CLUSTER_AGENT_ADDRESS: "0.0.0.0:8083"
+  XSCOPE_CLUSTER_AGENT_URL: "http://cluster-agent:8083"
   XSCOPE_GATEWAY_ADDRESS: "0.0.0.0:8080"
-  RUST_LOG: "xscope_gateway=info,pingora=warn"
+  XSCOPE_CONTROL_INTERNAL_URL: "http://control-plane:8084/internal/v1"
+  XSCOPE_POLICY_REFRESH_SECONDS: "5"
+  XSCOPE_REDIS_URL: "redis://redis:6379/"
+  RUST_LOG: "xscope_gateway=info,xscope_control_plane=info,tower_http=info,sea_orm=warn,pingora=warn"
   XSCOPE_LOG_FORMAT: "json"
   XSCOPE_UPSTREAMS_JSON: '[{"id":"runtime-dev","address":"runtime:8090","weight":100}]'
   XSCOPE_USAGE_WAL: "/var/lib/xscope/usage-wal/events.jsonl"

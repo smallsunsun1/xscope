@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: XScope Control Plane API
-  version: 0.1.0
-  description: Initial contract. Admin endpoints require authentication before production use.
+  version: 0.2.0
+  description: Rust/Axum control-plane contract. Admin endpoints receive OIDC identity from the trusted console proxy.
 servers:
   - url: https://api.example.com
 paths:
@@ -28,6 +28,44 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/Model" }
+  /admin/v1/session:
+    get:
+      operationId: currentSession
+      responses:
+        "200":
+          description: PostgreSQL-backed platform identity synchronized from OIDC.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformUser" }
+  /admin/v1/users:
+    get:
+      operationId: listPlatformUsers
+      responses:
+        "200":
+          description: Users sharing a tenant managed by the current owner.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformUserList" }
+        "403": { $ref: "#/components/responses/Error" }
+  /admin/v1/users/{user_id}/memberships/{tenant_id}:
+    parameters:
+      - { name: user_id, in: path, required: true, schema: { type: string } }
+      - { name: tenant_id, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: updateTenantMembership
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateTenantMembership" }
+      responses:
+        "200":
+          description: Membership inserted or updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformUser" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /admin/v1/projects:
     get:
       operationId: listProjects
@@ -104,6 +142,177 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Quote" }
         "400": { $ref: "#/components/responses/Error" }
+  /admin/v1/billing/summary:
+    get:
+      operationId: billingSummary
+      parameters:
+        - { name: project_id, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: Tenant-filtered usage and cost aggregation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BillingSummary" }
+  /admin/v1/billing/accounts/{project_id}:
+    parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getBillingAccount
+      responses:
+        "200":
+          description: Project wallet and balance policy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BillingAccount" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      operationId: updateBalancePolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enforce_balance]
+              properties:
+                enforce_balance: { type: boolean }
+      responses:
+        "200":
+          description: Updated project wallet.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BillingAccount" }
+  /admin/v1/billing/orders:
+    get:
+      operationId: listBillingOrders
+      responses:
+        "200":
+          description: Tenant-filtered top-up orders.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BillingOrderList" }
+    post:
+      operationId: createBillingOrder
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateOrderRequest" }
+      responses:
+        "201":
+          description: Pending top-up order created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BillingOrder" }
+  /admin/v1/billing/orders/{order_id}/payments:
+    parameters:
+      - name: order_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: capturePayment
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CapturePaymentRequest" }
+      responses:
+        "201":
+          description: Payment captured and double-entry transaction committed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "409": { $ref: "#/components/responses/Error" }
+  /admin/v1/billing/payments:
+    get:
+      operationId: listPayments
+      responses:
+        "200":
+          description: Tenant-filtered payments.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentList" }
+  /admin/v1/billing/refunds:
+    get:
+      operationId: listRefunds
+      responses:
+        "200":
+          description: Tenant-filtered refunds.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RefundList" }
+    post:
+      operationId: createRefund
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateRefundRequest" }
+      responses:
+        "201":
+          description: Refund and reversing double-entry transaction committed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Refund" }
+  /admin/v1/billing/ledger:
+    get:
+      operationId: listLedgerTransactions
+      responses:
+        "200":
+          description: Append-only balanced transactions visible to the tenant owner.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerTransactionList" }
+  /admin/v1/billing/invoices:
+    get:
+      operationId: listInvoices
+      responses:
+        "200":
+          description: Tenant-filtered invoice records.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvoiceList" }
+    post:
+      operationId: createInvoice
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateInvoiceRequest" }
+      responses:
+        "201":
+          description: Invoice record issued for a project period.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invoice" }
+  /admin/v1/billing/reconciliation:
+    post:
+      operationId: reconcileProviderSettlements
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReconcileRequest" }
+      responses:
+        "200":
+          description: Tenant-scoped settlement comparison.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReconciliationReport" }
   /admin/v1/model-deployments:
     get:
       operationId: listModelDeployments
@@ -241,33 +450,42 @@ components:
     APIKeyRequest:
       type: object
       additionalProperties: false
-      required: [id, tenant_id, project_id, name]
+      required: [id, tenant_id, project_id, name, scopes, allowed_models, rate_limit_rpm, rate_limit_tpm, monthly_budget]
       properties:
         id: { type: string }
         tenant_id: { type: string }
         project_id: { type: string }
         name: { type: string }
+        scopes: { type: array, items: { type: string } }
+        allowed_models: { type: array, minItems: 1, items: { type: string } }
+        expires_at: { type: string, format: date-time }
+        rate_limit_rpm: { type: integer, minimum: 1 }
+        rate_limit_tpm: { type: integer, minimum: 1 }
+        monthly_budget: { $ref: "#/components/schemas/Money" }
     IssuedAPIKey:
-      type: object
-      additionalProperties: false
-      required: [id, tenant_id, project_id, name, created_at, secret]
-      properties:
-        id: { type: string }
-        tenant_id: { type: string }
-        project_id: { type: string }
-        name: { type: string }
-        created_at: { type: string, format: date-time }
-        secret: { type: string, description: Returned only by the issuance response. }
+      allOf:
+        - $ref: "#/components/schemas/APIKeyMetadata"
+        - type: object
+          required: [secret]
+          properties:
+            secret: { type: string, description: Returned only by the issuance response. }
     APIKeyMetadata:
       type: object
-      additionalProperties: false
-      required: [id, tenant_id, project_id, name, created_at]
+      required: [id, tenant_id, project_id, name, scopes, allowed_models, rate_limit_rpm, rate_limit_tpm, monthly_budget, created_at, status]
       properties:
         id: { type: string }
         tenant_id: { type: string }
         project_id: { type: string }
         name: { type: string }
+        scopes: { type: array, items: { type: string } }
+        allowed_models: { type: array, items: { type: string } }
+        expires_at: { type: string, format: date-time }
+        rate_limit_rpm: { type: integer, minimum: 1 }
+        rate_limit_tpm: { type: integer, minimum: 1 }
+        monthly_budget: { $ref: "#/components/schemas/Money" }
         created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        status: { enum: [active, expired, revoked] }
     APIKeyList:
       type: object
       required: [object, data]
@@ -283,6 +501,237 @@ components:
         model_id: { type: string }
         price_version: { type: string }
         maximum: { $ref: "#/components/schemas/Money" }
+    TenantMembership:
+      type: object
+      required: [tenant_id, role]
+      properties:
+        tenant_id: { type: string }
+        role: { enum: [owner, member] }
+    PlatformUser:
+      type: object
+      required: [id, external_subject, username, email, status, last_login_at, created_at, updated_at, memberships]
+      properties:
+        id: { type: string }
+        external_subject: { type: string }
+        username: { type: string }
+        email: { type: string }
+        status: { type: string }
+        last_login_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        memberships:
+          type: array
+          items: { $ref: "#/components/schemas/TenantMembership" }
+    PlatformUserList:
+      type: object
+      required: [object, data]
+      properties:
+        object: { const: list }
+        data: { type: array, items: { $ref: "#/components/schemas/PlatformUser" } }
+    UpdateTenantMembership:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role: { enum: [owner, member] }
+    ProjectBilling:
+      type: object
+      required: [project_id, requests, input_tokens, output_tokens, cost]
+      properties:
+        project_id: { type: string }
+        requests: { type: integer, minimum: 0 }
+        input_tokens: { type: integer, minimum: 0 }
+        output_tokens: { type: integer, minimum: 0 }
+        cost: { $ref: "#/components/schemas/Money" }
+    BillingSummary:
+      type: object
+      required: [period_start, period_end, requests, input_tokens, output_tokens, total, projects]
+      properties:
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        requests: { type: integer, minimum: 0 }
+        input_tokens: { type: integer, minimum: 0 }
+        output_tokens: { type: integer, minimum: 0 }
+        total: { $ref: "#/components/schemas/Money" }
+        projects:
+          type: array
+          items: { $ref: "#/components/schemas/ProjectBilling" }
+    BillingAccount:
+      type: object
+      required: [id, tenant_id, project_id, currency, balance, enforce_balance, status, created_at, updated_at]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        project_id: { type: string }
+        currency: { type: string }
+        balance: { $ref: "#/components/schemas/Money" }
+        enforce_balance: { type: boolean }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, project_id, amount, description]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        project_id: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        description: { type: string }
+    BillingOrder:
+      type: object
+      required: [id, tenant_id, project_id, kind, amount, status, description, created_at, updated_at]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        project_id: { type: string }
+        kind: { const: top_up }
+        amount: { $ref: "#/components/schemas/Money" }
+        status: { enum: [pending, paid] }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    BillingOrderList:
+      $ref: "#/components/schemas/BillingOrderListObject"
+    BillingOrderListObject:
+      type: object
+      required: [object, data]
+      properties:
+        object: { const: list }
+        data: { type: array, items: { $ref: "#/components/schemas/BillingOrder" } }
+    CapturePaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [id, provider, provider_reference]
+      properties:
+        id: { type: string }
+        provider: { type: string }
+        provider_reference: { type: string }
+    Payment:
+      type: object
+      required: [id, order_id, provider, provider_reference, amount, status, created_at]
+      properties:
+        id: { type: string }
+        order_id: { type: string }
+        provider: { type: string }
+        provider_reference: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        status: { type: string }
+        paid_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    PaymentList:
+      type: object
+      required: [object, data]
+      properties:
+        object: { const: list }
+        data: { type: array, items: { $ref: "#/components/schemas/Payment" } }
+    CreateRefundRequest:
+      type: object
+      additionalProperties: false
+      required: [id, payment_id, amount, reason]
+      properties:
+        id: { type: string }
+        payment_id: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        reason: { type: string }
+    Refund:
+      type: object
+      required: [id, payment_id, amount, reason, status, created_at]
+      properties:
+        id: { type: string }
+        payment_id: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        reason: { type: string }
+        status: { type: string }
+        provider_reference: { type: string }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+    RefundList:
+      type: object
+      required: [object, data]
+      properties:
+        object: { const: list }
+        data: { type: array, items: { $ref: "#/components/schemas/Refund" } }
+    LedgerEntry:
+      type: object
+      required: [id, transaction_id, billing_account_id, ledger_account, amount_microunits, currency, created_at]
+      properties:
+        id: { type: string }
+        transaction_id: { type: string }
+        billing_account_id: { type: string }
+        ledger_account: { type: string }
+        amount_microunits: { type: integer, description: One millionth of a currency minor unit. }
+        currency: { type: string }
+        created_at: { type: string, format: date-time }
+    LedgerTransaction:
+      type: object
+      required: [id, tenant_id, kind, reference_type, reference_id, description, created_at, entries]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        kind: { type: string }
+        reference_type: { type: string }
+        reference_id: { type: string }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+        entries: { type: array, minItems: 2, items: { $ref: "#/components/schemas/LedgerEntry" } }
+    LedgerTransactionList:
+      type: object
+      required: [object, data]
+      properties:
+        object: { const: list }
+        data: { type: array, items: { $ref: "#/components/schemas/LedgerTransaction" } }
+    CreateInvoiceRequest:
+      type: object
+      required: [id, tenant_id, project_id, period_start, period_end, title]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        project_id: { type: string }
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        title: { type: string }
+    Invoice:
+      allOf:
+        - $ref: "#/components/schemas/CreateInvoiceRequest"
+        - type: object
+          required: [amount, status, issued_at]
+          properties:
+            amount: { $ref: "#/components/schemas/Money" }
+            status: { type: string }
+            issued_at: { type: string, format: date-time }
+    InvoiceList:
+      type: object
+      required: [object, data]
+      properties:
+        object: { const: list }
+        data: { type: array, items: { $ref: "#/components/schemas/Invoice" } }
+    ProviderSettlement:
+      type: object
+      required: [provider_reference, amount]
+      properties:
+        provider_reference: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+    ReconcileRequest:
+      type: object
+      required: [tenant_id, provider, settlements]
+      properties:
+        tenant_id: { type: string }
+        provider: { type: string }
+        settlements: { type: array, items: { $ref: "#/components/schemas/ProviderSettlement" } }
+    ReconciliationReport:
+      type: object
+      required: [generated_at, provider, matched, platform_only, provider_only, amount_mismatches]
+      properties:
+        generated_at: { type: string, format: date-time }
+        provider: { type: string }
+        matched: { type: integer, minimum: 0 }
+        platform_only: { type: array, items: { type: string } }
+        provider_only: { type: array, items: { type: string } }
+        amount_mismatches:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/Money" }
     ModelDeployment:
       type: object
       required: [metadata, spec]
@@ -324,7 +773,10 @@ components:
             rollout:
               type: object
               properties:
-                strategy: { enum: [rolling, canary, blueGreen] }
+                strategy:
+                  type: string
+                  enum: [rolling]
+                  description: Canary and blue/green require the planned revision-routing API and are not accepted by v1alpha1.
         status:
           type: object
           properties:

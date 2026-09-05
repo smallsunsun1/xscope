@@ -1,6 +1,7 @@
 .git
 .build/*
 !.build/control-plane
+!.build/cluster-agent
 !.build/operator
 !.build/console
 !.build/console/**

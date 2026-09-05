@@ -1,0 +1,71 @@
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+
+package(default_visibility = ["//visibility:public"])
+
+pkg_tar(
+    name = "console_layer",
+    srcs = ["//web/console:console"],
+    package_dir = "/srv/console",
+    strip_prefix = "/web/console/dist",
+    mode = "0555",
+)
+
+pkg_tar(
+    name = "runtime_layer",
+    srcs = ["//python:runtime"],
+    include_runfiles = True,
+    package_dir = "/app",
+    mode = "0555",
+)
+
+[
+    pkg_tar(
+        name = name + "_layer",
+        srcs = [target],
+        package_dir = "/usr/local/bin",
+        mode = "0555",
+    )
+    for name, target in {
+        "control-plane": "//rust/services/control-plane",
+        "gateway": "//rust/gateway",
+        "cluster-agent": "//go/cluster-agent/cmd/server",
+        "operator": "//go/operator/cmd/operator",
+    }.items()
+]
+
+[
+    oci_image(
+        name = name,
+        base = "@runtime_base",
+        tars = [name + "_layer"] + ([":console_layer"] if name == "control-plane" else []),
+        entrypoint = [entrypoint],
+        user = "65532:65532",
+        env = {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"},
+        target_compatible_with = ["@platforms//os:linux"],
+    )
+    for name, entrypoint in {
+        "control-plane": "/usr/local/bin/control-plane",
+        "gateway": "/usr/local/bin/gateway",
+        "cluster-agent": "/usr/local/bin/server",
+        "operator": "/usr/local/bin/operator",
+        "runtime": "/app/runtime",
+    }.items()
+]
+
+[
+    oci_load(
+        name = name + "_load",
+        image = ":" + name,
+        repo_tags = ["xscope/" + name + ":dev"],
+        target_compatible_with = ["@platforms//os:linux"],
+    )
+    for name in ["control-plane", "gateway", "cluster-agent", "operator", "runtime"]
+]
+
+filegroup(
+    name = "tarballs",
+    srcs = [name + "_load" for name in ["control-plane", "gateway", "cluster-agent", "operator", "runtime"]],
+    output_group = "tarball",
+    target_compatible_with = ["@platforms//os:linux"],
+)

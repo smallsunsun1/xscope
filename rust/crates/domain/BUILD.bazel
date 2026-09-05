@@ -1,0 +1,21 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "domain",
+    srcs = ["src/lib.rs"],
+    aliases = aliases(),
+    crate_name = "xscope_domain",
+    edition = crate_edition(),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    visibility = ["//rust:__subpackages__"],
+    deps = all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "domain_test",
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    crate = ":domain",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

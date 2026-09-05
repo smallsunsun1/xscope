@@ -6,6 +6,7 @@ import {
   FolderKanban,
   KeyRound,
   Layers3,
+  ReceiptText,
   ServerCog,
   Sparkles,
 } from "lucide-react";
@@ -109,6 +110,7 @@ export function DashboardPage({ navigate }: { navigate: Navigate }) {
           <button className="quick-action" onClick={() => navigate("projects")}><FolderKanban /><span><strong>创建项目</strong><small>建立租户资源边界</small></span><ArrowRight /></button>
           <button className="quick-action" onClick={() => navigate("keys")}><KeyRound /><span><strong>签发 API Key</strong><small>为项目创建访问凭证</small></span><ArrowRight /></button>
           <button className="quick-action" onClick={() => navigate("models")}><Layers3 /><span><strong>估算调用费用</strong><small>按模型与 token 数报价</small></span><ArrowRight /></button>
+          <button className="quick-action" onClick={() => navigate("billing")}><ReceiptText /><span><strong>查看用量账单</strong><small>按项目聚合请求与费用</small></span><ArrowRight /></button>
         </div>
       </section>
     </>

@@ -19,7 +19,12 @@ filegroup(
 
 alias(
     name = "control-plane",
-    actual = "//go/control-plane/cmd/server",
+    actual = "//rust/services/control-plane",
+)
+
+alias(
+    name = "cluster-agent",
+    actual = "//go/cluster-agent/cmd/server",
 )
 
 alias(

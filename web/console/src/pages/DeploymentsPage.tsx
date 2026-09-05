@@ -182,7 +182,7 @@ export function DeploymentsPage() {
           <div className="form-section-title">资源请求 / 上限</div>
           <div className="form-pair"><Form.Item name="cpu_request" label="CPU 请求"><Input /></Form.Item><Form.Item name="cpu_limit" label="CPU 上限"><Input /></Form.Item></div>
           <div className="form-pair"><Form.Item name="memory_request" label="内存请求"><Input /></Form.Item><Form.Item name="memory_limit" label="内存上限"><Input /></Form.Item></div>
-          <div className="form-pair"><Form.Item name="gpu" label="GPU 数量"><InputNumber min={0} precision={0} /></Form.Item><Form.Item name="strategy" label="发布策略"><Select options={[{ value: "rolling", label: "Rolling" }, { value: "canary", label: "Canary" }, { value: "blueGreen", label: "Blue / Green" }]} /></Form.Item></div>
+          <div className="form-pair"><Form.Item name="gpu" label="GPU 数量"><InputNumber min={0} precision={0} /></Form.Item><Form.Item name="strategy" label="发布策略"><Select options={[{ value: "rolling", label: "Rolling" }, { value: "canary", label: "Canary（下一阶段）", disabled: true }, { value: "blueGreen", label: "Blue / Green（下一阶段）", disabled: true }]} /></Form.Item></div>
         </Form>
       </Drawer>
 

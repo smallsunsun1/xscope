@@ -1,13 +1,26 @@
 import type {
   APIErrorBody,
   APIKey,
+  APIKeyRequest,
+  BillingAccount,
+  BillingOrder,
+  BillingSummary,
+  CreateOrderRequest,
   Health,
   IssuedAPIKey,
   ListResponse,
+  Money,
   Model,
   ModelDeployment,
+  Invoice,
+  LedgerTransaction,
+  Payment,
+  PlatformUser,
   Project,
   Quote,
+  ReconciliationReport,
+  ReconcileRequest,
+  Refund,
   Session,
 } from "./types";
 
@@ -59,6 +72,12 @@ export const api = {
   session: () => request<Session>("/admin/v1/session"),
   models: async () => (await request<ListResponse<Model>>("/v1/models")).data,
   projects: async () => (await request<ListResponse<Project>>("/admin/v1/projects")).data,
+  users: async () => (await request<ListResponse<PlatformUser>>("/admin/v1/users")).data,
+  updateMembership: (userID: string, tenantID: string, role: "owner" | "member") =>
+    request<PlatformUser>(
+      `/admin/v1/users/${encodeURIComponent(userID)}/memberships/${encodeURIComponent(tenantID)}`,
+      { method: "PUT", body: JSON.stringify({ role }) },
+    ),
   createProject: (project: Project) =>
     request<Project>("/admin/v1/projects", {
       method: "POST",
@@ -66,7 +85,7 @@ export const api = {
       body: JSON.stringify(project),
     }),
   apiKeys: async () => (await request<ListResponse<APIKey>>("/admin/v1/api-keys")).data,
-  createAPIKey: (payload: Omit<APIKey, "created_at">) =>
+  createAPIKey: (payload: APIKeyRequest) =>
     request<IssuedAPIKey>("/admin/v1/api-keys", {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey("console-api-key") },
@@ -82,6 +101,62 @@ export const api = {
     });
     return request<Quote>(`/admin/v1/quote?${params}`);
   },
+  billingSummary: (projectID = "") => {
+    const params = new URLSearchParams();
+    if (projectID) params.set("project_id", projectID);
+    const query = params.size ? `?${params}` : "";
+    return request<BillingSummary>(`/admin/v1/billing/summary${query}`);
+  },
+  billingAccount: (projectID: string) =>
+    request<BillingAccount>(`/admin/v1/billing/accounts/${encodeURIComponent(projectID)}`),
+  updateBalancePolicy: (projectID: string, enforceBalance: boolean) =>
+    request<BillingAccount>(`/admin/v1/billing/accounts/${encodeURIComponent(projectID)}`, {
+      method: "PUT",
+      body: JSON.stringify({ enforce_balance: enforceBalance }),
+    }),
+  billingOrders: async () =>
+    (await request<ListResponse<BillingOrder>>("/admin/v1/billing/orders")).data,
+  createOrder: (payload: CreateOrderRequest) =>
+    request<BillingOrder>("/admin/v1/billing/orders", {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey("console-order") },
+      body: JSON.stringify(payload),
+    }),
+  capturePayment: (orderID: string, paymentID: string) =>
+    request<Payment>(`/admin/v1/billing/orders/${encodeURIComponent(orderID)}/payments`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey("console-payment") },
+      body: JSON.stringify({
+        id: paymentID,
+        provider: "manual",
+        provider_reference: `manual-${crypto.randomUUID()}`,
+      }),
+    }),
+  payments: async () =>
+    (await request<ListResponse<Payment>>("/admin/v1/billing/payments")).data,
+  refunds: async () =>
+    (await request<ListResponse<Refund>>("/admin/v1/billing/refunds")).data,
+  createRefund: (paymentID: string, amount: Money, reason: string) =>
+    request<Refund>("/admin/v1/billing/refunds", {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey("console-refund") },
+      body: JSON.stringify({ id: `refund-${crypto.randomUUID()}`, payment_id: paymentID, amount, reason }),
+    }),
+  ledger: async () =>
+    (await request<ListResponse<LedgerTransaction>>("/admin/v1/billing/ledger")).data,
+  invoices: async () =>
+    (await request<ListResponse<Invoice>>("/admin/v1/billing/invoices")).data,
+  createInvoice: (payload: Omit<Invoice, "amount" | "status" | "issued_at">) =>
+    request<Invoice>("/admin/v1/billing/invoices", {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey("console-invoice") },
+      body: JSON.stringify(payload),
+    }),
+  reconcile: (payload: ReconcileRequest) =>
+    request<ReconciliationReport>("/admin/v1/billing/reconciliation", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   deployments: async (namespace: string) =>
     (
       await request<ListResponse<ModelDeployment>>(

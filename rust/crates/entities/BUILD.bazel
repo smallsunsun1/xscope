@@ -1,0 +1,13 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "entities",
+    srcs = glob(["src/*.rs"]),
+    aliases = aliases(),
+    crate_name = "xscope_entities",
+    edition = crate_edition(),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    visibility = ["//rust:__subpackages__"],
+    deps = all_crate_deps(normal = True),
+)
