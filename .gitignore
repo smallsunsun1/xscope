@@ -1,0 +1,11 @@
+/bazel-*
+rust/target/
+python/.venv/
+web/node_modules/
+web/package-lock.json
+web/console/dist/
+web/.vite/
+/.idea
+__pycache__/
+*.pyc
+.DS_Store

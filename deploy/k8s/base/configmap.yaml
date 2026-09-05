@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: xscope-config
+  namespace: xscope-system
+data:
+  XSCOPE_CONTROL_ADDRESS: "0.0.0.0:8081"
+  XSCOPE_GATEWAY_ADDRESS: "0.0.0.0:8080"
+  XSCOPE_UPSTREAMS_JSON: '[{"id":"runtime-dev","address":"runtime:8090","weight":100}]'
+  XSCOPE_USAGE_WAL: "/var/lib/xscope/usage-wal/events.jsonl"
+  XSCOPE_REGION: "local"
+  XSCOPE_MODEL_REVISION: "development"
+  XSCOPE_PRICE_VERSION: "2026-09-01"
+  XSCOPE_RUNTIME_HOST: "0.0.0.0"
+  XSCOPE_RUNTIME_PORT: "8090"
+  XSCOPE_OPERATOR_ADDRESS: "0.0.0.0:8082"

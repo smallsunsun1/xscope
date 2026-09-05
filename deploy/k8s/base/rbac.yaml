@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: xscope-control-plane
+  namespace: xscope-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: xscope-control-plane
+rules:
+  - apiGroups: [platform.xscope.io]
+    resources: [modeldeployments]
+    verbs: [get, list, create, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: xscope-control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: xscope-control-plane
+subjects:
+  - kind: ServiceAccount
+    name: xscope-control-plane
+    namespace: xscope-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: xscope-operator
+  namespace: xscope-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: xscope-operator
+rules:
+  - apiGroups: [platform.xscope.io]
+    resources: [modeldeployments]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [platform.xscope.io]
+    resources: [modeldeployments/status, modeldeployments/finalizers]
+    verbs: [get, update, patch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [services, configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: xscope-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: xscope-operator
+subjects:
+  - kind: ServiceAccount
+    name: xscope-operator
+    namespace: xscope-system

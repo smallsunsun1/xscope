@@ -1,0 +1,37 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+
+rust_library(
+    name = "gateway_lib",
+    srcs = glob(
+        ["src/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    aliases = aliases(),
+    crate_name = "xscope_gateway",
+    edition = crate_edition(),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = all_crate_deps(normal = True),
+)
+
+rust_binary(
+    name = "gateway",
+    srcs = ["src/main.rs"],
+    aliases = aliases(),
+    crate_root = "src/main.rs",
+    edition = crate_edition(),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    visibility = ["//visibility:public"],
+    deps = [":gateway_lib"] + all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "gateway_test",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    crate = ":gateway_lib",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

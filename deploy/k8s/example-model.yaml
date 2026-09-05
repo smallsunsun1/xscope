@@ -1,0 +1,36 @@
+apiVersion: platform.xscope.io/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: xscope-demo
+  namespace: xscope-system
+spec:
+  model:
+    id: xscope-demo
+    revision: "2026-09-01"
+    uri: s3://xscope-models/xscope-demo/2026-09-01
+    checksum: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  runtime:
+    image: ghcr.io/example/vllm:dev
+    protocol: openai
+    port: 8000
+    arguments: ["--model", "/models/xscope-demo"]
+  replicas: 1
+  resources:
+    requests:
+      cpu: "4"
+      memory: 16Gi
+      nvidia.com/gpu: "1"
+    limits:
+      cpu: "8"
+      memory: 32Gi
+      nvidia.com/gpu: "1"
+  autoscaling:
+    minReplicas: 1
+    maxReplicas: 8
+    targetPendingRequests: 4
+  rollout:
+    strategy: canary
+    canaryWeight: 10
+  nodeSelector:
+    accelerator: nvidia-gpu
+

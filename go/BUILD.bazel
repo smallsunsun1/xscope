@@ -1,0 +1,6 @@
+# gazelle:prefix xscope.dev/xscope
+
+exports_files([
+    "go.mod",
+    "go.sum",
+])

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscope.example/schemas/usage-event-v1.json",
+  "title": "UsageEventV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "request_id",
+    "occurred_at",
+    "tenant_id",
+    "project_id",
+    "model_id",
+    "model_revision",
+    "region",
+    "price_version",
+    "input_tokens",
+    "output_tokens",
+    "status"
+  ],
+  "properties": {
+    "schema_version": { "const": "v1" },
+    "event_id": { "type": "string", "minLength": 16 },
+    "request_id": { "type": "string", "minLength": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "tenant_id": { "type": "string" },
+    "project_id": { "type": "string" },
+    "api_key_id": { "type": "string" },
+    "model_id": { "type": "string" },
+    "model_revision": { "type": "string" },
+    "endpoint_id": { "type": "string" },
+    "region": { "type": "string" },
+    "price_version": { "type": "string" },
+    "input_tokens": { "type": "integer", "minimum": 0 },
+    "output_tokens": { "type": "integer", "minimum": 0 },
+    "cached_input_tokens": { "type": "integer", "minimum": 0, "default": 0 },
+    "latency_ms": { "type": "integer", "minimum": 0 },
+    "time_to_first_token_ms": { "type": "integer", "minimum": 0 },
+    "status": { "enum": ["succeeded", "client_error", "provider_error", "cancelled"] },
+    "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+  }
+}
+

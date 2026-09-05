@@ -1,0 +1,19 @@
+environment: development
+region: local
+gateway:
+  listen: 0.0.0.0:8080
+  upstreamsEnv: XSCOPE_UPSTREAMS_JSON
+  # Runtime secret injection uses XSCOPE_API_KEYS_JSON; never commit real keys here.
+  apiKeysEnv: XSCOPE_API_KEYS_JSON
+  configRefresh: 5s
+  failClosedAfter: 15m
+  limits:
+    requestBytes: 1048576
+    streamSeconds: 600
+controlPlane:
+  listen: 0.0.0.0:8081
+runtime:
+  endpoint: http://127.0.0.1:8090
+usage:
+  topic: xscope.usage.v1
+  localWal: /var/lib/xscope/usage-wal/events.jsonl

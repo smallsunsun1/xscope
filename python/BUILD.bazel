@@ -1,0 +1,40 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
+load("@xscope_pypi//:requirements.bzl", "requirement")
+
+py_library(
+    name = "runtime_lib",
+    srcs = glob(["src/xscope_runtime/*.py"]),
+    imports = ["src"],
+    deps = [
+        requirement("fastapi"),
+        requirement("pydantic"),
+        requirement("uvicorn"),
+    ],
+)
+
+py_binary(
+    name = "runtime",
+    srcs = [
+        "src/xscope_runtime/__init__.py",
+        "src/xscope_runtime/main.py",
+    ],
+    imports = ["src"],
+    main = "src/xscope_runtime/main.py",
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("fastapi"),
+        requirement("pydantic"),
+        requirement("uvicorn"),
+    ],
+)
+
+py_test(
+    name = "runtime_test",
+    srcs = ["tests/test_runtime.py"],
+    imports = ["src"],
+    main = "tests/test_runtime.py",
+    deps = [
+        ":runtime_lib",
+        requirement("httpx"),
+    ],
+)

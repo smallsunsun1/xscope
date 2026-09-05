@@ -1,0 +1,28 @@
+[package]
+name = "xscope-gateway"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+env_logger.workspace = true
+http.workspace = true
+log.workspace = true
+pingora-core.workspace = true
+pingora-error.workspace = true
+pingora-http.workspace = true
+pingora-load-balancing.workspace = true
+pingora-proxy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,39 @@
+load("@npm//web:typescript/package_json.bzl", tsc = "bin")
+load("@npm//web:vite/package_json.bzl", vite = "bin")
+
+package(default_visibility = ["//visibility:public"])
+
+CONSOLE_SRCS = glob([
+    "src/**/*.css",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+]) + [
+    "index.html",
+    "tsconfig.json",
+    "vite.config.ts",
+]
+
+tsc.tsc_test(
+    name = "typecheck",
+    args = [
+        "--project",
+        "web/console/tsconfig.json",
+        "--noEmit",
+    ],
+    data = CONSOLE_SRCS + ["//web:node_modules"],
+)
+
+vite.vite(
+    name = "console",
+    srcs = CONSOLE_SRCS,
+    args = [
+        "build",
+        "--config",
+        "vite.config.ts",
+        "--outDir",
+        "dist",
+    ],
+    chdir = "web/console",
+    data = ["//web:node_modules"],
+    out_dirs = ["dist"],
+)

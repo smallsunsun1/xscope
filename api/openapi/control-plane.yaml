@@ -1,0 +1,341 @@
+openapi: 3.1.0
+info:
+  title: XScope Control Plane API
+  version: 0.1.0
+  description: Initial contract. Admin endpoints require authentication before production use.
+servers:
+  - url: https://api.example.com
+paths:
+  /healthz:
+    get:
+      operationId: health
+      responses:
+        "200":
+          description: Process is alive.
+  /v1/models:
+    get:
+      operationId: listModels
+      responses:
+        "200":
+          description: Models visible to the caller.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data]
+                properties:
+                  object: { const: list }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Model" }
+  /admin/v1/projects:
+    get:
+      operationId: listProjects
+      responses:
+        "200":
+          description: Projects visible to the administrator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProjectList" }
+    post:
+      operationId: createProject
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Project" }
+      responses:
+        "201":
+          description: Project created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /admin/v1/api-keys:
+    get:
+      operationId: listApiKeys
+      description: Lists key metadata. Plaintext secrets are never returned.
+      responses:
+        "200":
+          description: Active API key metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIKeyList" }
+    post:
+      operationId: createApiKey
+      description: The plaintext secret is returned only by the issuance response.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/APIKeyRequest" }
+      responses:
+        "201":
+          description: API key created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedAPIKey" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /admin/v1/api-keys/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceID"
+    delete:
+      operationId: revokeApiKey
+      responses:
+        "204": { description: API key revoked. }
+        "404": { $ref: "#/components/responses/Error" }
+  /admin/v1/quote:
+    get:
+      operationId: quoteUsage
+      parameters:
+        - { name: model, in: query, required: true, schema: { type: string } }
+        - { name: input_tokens, in: query, required: true, schema: { type: integer, minimum: 0 } }
+        - { name: output_tokens, in: query, required: true, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: Maximum price quote in the currency's smallest unit.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Quote" }
+        "400": { $ref: "#/components/responses/Error" }
+  /admin/v1/model-deployments:
+    get:
+      operationId: listModelDeployments
+      parameters:
+        - name: namespace
+          in: query
+          schema: { type: string, default: xscope-system }
+      responses:
+        "200":
+          description: ModelDeployment resources in the selected namespace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelDeploymentList" }
+        "503": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createModelDeployment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelDeployment" }
+      responses:
+        "201":
+          description: ModelDeployment accepted by Kubernetes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelDeployment" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /admin/v1/model-deployments/{namespace}/{name}/scale:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/ResourceName"
+    put:
+      operationId: scaleModelDeployment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [replicas]
+              properties:
+                replicas: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Desired replica count updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelDeployment" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /admin/v1/model-deployments/{namespace}/{name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/ResourceName"
+    delete:
+      operationId: deleteModelDeployment
+      responses:
+        "204": { description: ModelDeployment deleted or already absent. }
+        "503": { $ref: "#/components/responses/Error" }
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 16, maxLength: 128 }
+    ResourceID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+    Namespace:
+      name: namespace
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+    ResourceName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+  responses:
+    Error:
+      description: Structured API error.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+  schemas:
+    Money:
+      type: object
+      required: [currency, amount]
+      properties:
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        amount: { type: integer, description: Smallest currency unit. }
+    Model:
+      type: object
+      required: [id, display_name, max_context_tokens, price_version]
+      properties:
+        id: { type: string }
+        display_name: { type: string }
+        max_context_tokens: { type: integer }
+        input_per_million_tokens: { $ref: "#/components/schemas/Money" }
+        output_per_million_tokens: { $ref: "#/components/schemas/Money" }
+        price_version: { type: string }
+    Project:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, name]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        name: { type: string }
+    ProjectList:
+      type: object
+      required: [object, data]
+      properties:
+        object: { const: list }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Project" }
+    APIKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, project_id, name]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+    IssuedAPIKey:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, project_id, name, created_at, secret]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        secret: { type: string, description: Returned only by the issuance response. }
+    APIKeyMetadata:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, project_id, name, created_at]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+    APIKeyList:
+      type: object
+      required: [object, data]
+      properties:
+        object: { const: list }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/APIKeyMetadata" }
+    Quote:
+      type: object
+      required: [model_id, price_version, maximum]
+      properties:
+        model_id: { type: string }
+        price_version: { type: string }
+        maximum: { $ref: "#/components/schemas/Money" }
+    ModelDeployment:
+      type: object
+      required: [metadata, spec]
+      properties:
+        apiVersion: { type: string, const: platform.xscope.io/v1alpha1 }
+        kind: { type: string, const: ModelDeployment }
+        metadata:
+          type: object
+          required: [name, namespace]
+          properties:
+            name: { type: string }
+            namespace: { type: string }
+            creationTimestamp: { type: string, format: date-time }
+        spec:
+          type: object
+          required: [model, runtime, replicas, resources]
+          properties:
+            model:
+              type: object
+              required: [id, revision, uri, checksum]
+              properties:
+                id: { type: string }
+                revision: { type: string }
+                uri: { type: string }
+                checksum: { type: string, pattern: "^sha256:[a-f0-9]{64}$" }
+            runtime:
+              type: object
+              required: [image, protocol]
+              properties:
+                image: { type: string }
+                protocol: { enum: [openai, triton-grpc, custom-http] }
+                port: { type: integer, minimum: 1, maximum: 65535, default: 8000 }
+            replicas: { type: integer, minimum: 0 }
+            resources:
+              type: object
+              properties:
+                requests: { type: object, additionalProperties: { type: string } }
+                limits: { type: object, additionalProperties: { type: string } }
+            rollout:
+              type: object
+              properties:
+                strategy: { enum: [rolling, canary, blueGreen] }
+        status:
+          type: object
+          properties:
+            observedGeneration: { type: integer }
+            readyReplicas: { type: integer }
+            endpoint: { type: string }
+    ModelDeploymentList:
+      type: object
+      required: [object, data]
+      properties:
+        object: { const: list }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ModelDeployment" }

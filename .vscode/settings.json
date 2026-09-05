@@ -1,0 +1,28 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "${workspaceFolder}/rust/Cargo.toml"
+  ],
+  "rust-analyzer.cargo.allTargets": true,
+  "rust-analyzer.check.command": "clippy",
+  "go.toolsEnvVars": {
+    "GOWORK": "off"
+  },
+  "gopls": {
+    "directoryFilters": [
+      "-rust",
+      "-python",
+      "-web"
+    ]
+  },
+  "python.defaultInterpreterPath": "${workspaceFolder}/python/.venv/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/python/src"
+  ],
+  "typescript.tsdk": "${workspaceFolder}/web/node_modules/typescript/lib",
+  "python.analysis.exclude": [
+    "**/bazel-*/**",
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*"
+  ]
+}

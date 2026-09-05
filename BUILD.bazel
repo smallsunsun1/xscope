@@ -1,0 +1,43 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+package(default_visibility = ["//visibility:public"])
+
+gazelle(name = "gazelle")
+
+filegroup(
+    name = "api-contracts",
+    srcs = glob([
+        "api/**/*.json",
+        "api/**/*.yaml",
+    ]),
+)
+
+filegroup(
+    name = "k8s-manifests",
+    srcs = glob(["deploy/k8s/**/*.yaml"]),
+)
+
+alias(
+    name = "control-plane",
+    actual = "//go/control-plane/cmd/server",
+)
+
+alias(
+    name = "operator",
+    actual = "//go/operator/cmd/operator",
+)
+
+alias(
+    name = "gateway",
+    actual = "//rust/gateway",
+)
+
+alias(
+    name = "runtime",
+    actual = "//python:runtime",
+)
+
+alias(
+    name = "console",
+    actual = "//web/console",
+)
