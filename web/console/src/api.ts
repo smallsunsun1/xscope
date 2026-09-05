@@ -8,6 +8,7 @@ import type {
   ModelDeployment,
   Project,
   Quote,
+  Session,
 } from "./types";
 
 const controlBase = import.meta.env.VITE_CONTROL_API_BASE ?? "/api";
@@ -55,6 +56,7 @@ function idempotencyKey(prefix: string): string {
 
 export const api = {
   health: () => request<Health>("/healthz"),
+  session: () => request<Session>("/admin/v1/session"),
   models: async () => (await request<ListResponse<Model>>("/v1/models")).data,
   projects: async () => (await request<ListResponse<Project>>("/admin/v1/projects")).data,
   createProject: (project: Project) =>
@@ -103,11 +105,8 @@ export const api = {
     ),
 };
 
-export async function componentHealth(path: string): Promise<Health> {
-  const response = await fetch(path, { headers: { Accept: "application/json" } });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return (await response.json()) as Health;
-}
+export const componentHealth = (component: string) =>
+  request<Health>(`/admin/v1/components/${encodeURIComponent(component)}/health`);
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "发生未知错误";

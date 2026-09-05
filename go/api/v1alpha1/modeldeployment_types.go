@@ -45,6 +45,8 @@ type ModelDeploymentStatus struct {
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 	ReadyReplicas      int32              `json:"readyReplicas,omitempty"`
 	Endpoint           string             `json:"endpoint,omitempty"`
+	ClusterID          string             `json:"clusterId,omitempty"`
+	Region             string             `json:"region,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
 

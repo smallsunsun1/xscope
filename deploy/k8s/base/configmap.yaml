@@ -5,7 +5,12 @@ metadata:
   namespace: xscope-system
 data:
   XSCOPE_CONTROL_ADDRESS: "0.0.0.0:8081"
+  XSCOPE_CONSOLE_AUTH: "trusted-headers"
+  XSCOPE_CONSOLE_DIR: "/srv/console"
+  XSCOPE_CLUSTER_ID: "docker-desktop"
   XSCOPE_GATEWAY_ADDRESS: "0.0.0.0:8080"
+  RUST_LOG: "xscope_gateway=info,pingora=warn"
+  XSCOPE_LOG_FORMAT: "json"
   XSCOPE_UPSTREAMS_JSON: '[{"id":"runtime-dev","address":"runtime:8090","weight":100}]'
   XSCOPE_USAGE_WAL: "/var/lib/xscope/usage-wal/events.jsonl"
   XSCOPE_REGION: "local"
@@ -14,3 +19,7 @@ data:
   XSCOPE_RUNTIME_HOST: "0.0.0.0"
   XSCOPE_RUNTIME_PORT: "8090"
   XSCOPE_OPERATOR_ADDRESS: "0.0.0.0:8082"
+  XSCOPE_OPERATOR_METRICS_ADDRESS: "0"
+  XSCOPE_GATEWAY_HEALTH_URL: "http://gateway:80/healthz"
+  XSCOPE_RUNTIME_HEALTH_URL: "http://runtime:8090/healthz"
+  XSCOPE_OPERATOR_HEALTH_URL: "http://operator:8082/healthz"

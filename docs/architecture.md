@@ -99,6 +99,6 @@
 
 - **M0（已完成）**：按语言组织的原生工作区、契约、健康检查、CRD。
 - **M1（进行中）**：项目/API Key → Pingora 网关认证 → FastAPI backend → usage WAL；待补计量账本。
-- **M2**：真实 vLLM、Redis 配额、Kafka、PostgreSQL、Operator reconcile、基础控制台。
+- **M2（进行中）**：已完成 Operator 基础 reconcile 和 Ant Design 控制台；待接入真实 vLLM、Redis 配额、Kafka 与 PostgreSQL。
 - **M3**：多集群路由、灰度、自动扩缩、支付/账单、审计与 SLO。
 - **M4**：企业 SSO、数据驻留、batch/fine-tune、市场化模型接入与成本优化。

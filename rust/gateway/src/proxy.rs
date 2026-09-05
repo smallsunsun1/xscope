@@ -231,15 +231,19 @@ impl ProxyHttp for Gateway {
     async fn logging(&self, _session: &mut Session, error: Option<&Error>, ctx: &mut Self::CTX) {
         if !ctx.usage_emitted {
             if let Err(record_error) = self.emit_usage(ctx, error) {
-                log::error!("usage WAL write failed: {record_error}");
+                tracing::error!(
+                    error = %record_error,
+                    request_id = %ctx.request_id,
+                    "usage WAL write failed"
+                );
             }
         }
-        log::info!(
-            "request_id={} endpoint={} status={} latency_ms={}",
-            ctx.request_id,
-            ctx.endpoint_id,
-            ctx.response_status,
-            ctx.started.elapsed().as_millis()
+        tracing::info!(
+            request_id = %ctx.request_id,
+            endpoint = %ctx.endpoint_id,
+            status = ctx.response_status,
+            latency_ms = ctx.started.elapsed().as_millis(),
+            "request completed"
         );
     }
 }

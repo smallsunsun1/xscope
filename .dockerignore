@@ -1,0 +1,12 @@
+.git
+.build/*
+!.build/control-plane
+!.build/operator
+!.build/console
+!.build/console/**
+bazel-*
+rust/target
+web/node_modules
+web/console/dist
+**/__pycache__
+**/.pytest_cache

@@ -1,7 +1,12 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+const configProcess = (globalThis as typeof globalThis & {
+  process?: { cwd?: () => string; env?: { XSCOPE_BAZEL_BUILD?: string } };
+}).process;
+const bazelBuild = configProcess?.env?.XSCOPE_BAZEL_BUILD === "1";
 const consoleRoot = new URL(".", import.meta.url).pathname;
+const outputDirectory = bazelBuild ? `${configProcess?.cwd?.() ?? "."}/dist` : "dist";
 
 export default defineConfig({
   root: consoleRoot,
@@ -33,8 +38,8 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: "dist",
-    emptyOutDir: true,
+    outDir: outputDirectory,
+    emptyOutDir: !bazelBuild,
     sourcemap: true,
   },
 });

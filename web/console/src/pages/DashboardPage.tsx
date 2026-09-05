@@ -15,16 +15,15 @@ import { MetricCard, PageHeader, StatusTag } from "../components";
 type Navigate = (page: string) => void;
 
 const components = [
-  { name: "Control Plane", detail: "Go · :8081", path: "/api/healthz" },
-  { name: "Gateway", detail: "Pingora · :8080", path: "/gateway/healthz" },
-  { name: "Runtime", detail: "FastAPI · :8090", path: "/runtime/healthz" },
-  { name: "Operator", detail: "controller-runtime · :8082", path: "/operator/healthz" },
+  { name: "Gateway", detail: "Pingora · :8080", component: "gateway" },
+  { name: "Runtime", detail: "FastAPI · :8090", component: "runtime" },
+  { name: "Operator", detail: "controller-runtime · :8082", component: "operator" },
 ];
 
-function ComponentRow({ name, detail, path }: (typeof components)[number]) {
+function ComponentRow({ name, detail, component }: (typeof components)[number]) {
   const health = useQuery({
-    queryKey: ["component-health", path],
-    queryFn: () => componentHealth(path),
+    queryKey: ["component-health", component],
+    queryFn: () => componentHealth(component),
     refetchInterval: 15_000,
     retry: false,
   });
@@ -92,10 +91,10 @@ export function DashboardPage({ navigate }: { navigate: Navigate }) {
             <div><span className="panel-kicker">Kubernetes</span><h2>部署就绪度</h2></div>
           </div>
           {deployments.isError ? (
-            <Alert type="info" showIcon message="集群未连接" description="配置 kubeconfig 或在集群内运行控制面后，即可在这里管理 ModelDeployment。" />
+            <Alert type="info" showIcon title="集群未连接" description="配置 kubeconfig 或在集群内运行控制面后，即可在这里管理 ModelDeployment。" />
           ) : (
             <div className="readiness-content">
-              <Progress type="dashboard" percent={readiness} strokeColor="#20a981" trailColor="#e7efec" />
+              <Progress type="dashboard" percent={readiness} strokeColor="#20a981" railColor="#e7efec" />
               <div><strong>{readyReplicas} 个副本已就绪</strong><span>期望副本 {desiredReplicas} · 部署 {deployments.data?.length ?? 0}</span></div>
             </div>
           )}

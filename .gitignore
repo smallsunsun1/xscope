@@ -9,3 +9,4 @@ web/.vite/
 __pycache__/
 *.pyc
 .DS_Store
+.build

@@ -59,7 +59,7 @@ export function ProjectsPage() {
           ]}
         />
       </section>
-      <Drawer title="创建项目" width={460} open={open} onClose={() => setOpen(false)} destroyOnHidden extra={<Button type="primary" loading={create.isPending} onClick={() => form.submit()}>创建</Button>}>
+      <Drawer title="创建项目" size={460} open={open} onClose={() => setOpen(false)} destroyOnHidden extra={<Button type="primary" loading={create.isPending} onClick={() => form.submit()}>创建</Button>}>
         <p className="drawer-intro">项目创建后，ID 和所属租户不可修改。</p>
         <Form form={form} layout="vertical" onFinish={(values) => create.mutate(values)}>
           <Form.Item name="name" label="项目名称" rules={[{ required: true, message: "请输入项目名称" }]}><Input autoFocus placeholder="例如：智能客服生产环境" /></Form.Item>

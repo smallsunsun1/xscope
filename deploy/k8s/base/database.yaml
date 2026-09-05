@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: xscope-system
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: xscope
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: xscope-system
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: xscope
+    spec:
+      securityContext:
+        fsGroup: 70
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_DB
+              value: keycloak
+            - name: POSTGRES_USER
+              value: xscope
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: xscope-platform-secrets
+                  key: postgres-password
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "xscope", "-d", "keycloak"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "xscope", "-d", "keycloak"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 25m, memory: 96Mi }
+            limits: { cpu: 300m, memory: 384Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: xscope-keycloak-realm
+  namespace: xscope-system
+data:
+  xscope-realm.json: |
+    {
+      "realm": "xscope",
+      "enabled": true,
+      "displayName": "XScope",
+      "registrationAllowed": false,
+      "resetPasswordAllowed": true,
+      "loginWithEmailAllowed": true,
+      "roles": {
+        "realm": [
+          { "name": "platform-admin", "description": "XScope platform administrator" }
+        ]
+      },
+      "clients": [
+        {
+          "clientId": "xscope-console",
+          "name": "XScope Console",
+          "enabled": true,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "${XSCOPE_OAUTH_CLIENT_SECRET}",
+          "redirectUris": ["http://localhost:30081/*"],
+          "webOrigins": ["http://localhost:30081"],
+          "standardFlowEnabled": true,
+          "directAccessGrantsEnabled": false,
+          "protocol": "openid-connect"
+        }
+      ],
+      "users": [
+        {
+          "username": "platform-admin",
+          "email": "admin@local.xscope",
+          "emailVerified": true,
+          "enabled": true,
+          "realmRoles": ["platform-admin"],
+          "credentials": [
+            { "type": "password", "value": "${XSCOPE_BOOTSTRAP_USER_PASSWORD}", "temporary": false }
+          ]
+        }
+      ]
+    }

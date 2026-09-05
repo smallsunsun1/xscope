@@ -90,7 +90,7 @@ export function DeploymentsPage() {
     onError: (error) => message.error(errorMessage(error)),
   });
 
-  const clusterUnavailable = deployments.error instanceof APIError && deployments.error.code === "cluster_unavailable";
+  const clusterUnavailable = deployments.error instanceof APIError && deployments.error.status === 503;
   const showCreate = () => {
     const model = models.data?.[0];
     form.setFieldsValue({
@@ -131,14 +131,14 @@ export function DeploymentsPage() {
           className="page-alert"
           type="info"
           showIcon
-          message="Kubernetes 集群尚未连接"
+          title="Kubernetes 集群尚未连接"
           description="控制面会继续提供项目、Key 和报价服务。配置 KUBECONFIG 或部署到集群后，本页会自动启用。"
           action={<Button size="small" icon={<RotateCcw size={14} />} onClick={() => deployments.refetch()}>重新检查</Button>}
         />
       )}
       <section className="panel table-panel">
         <div className="table-toolbar">
-          <Input addonBefore="Namespace" value={namespace} onChange={(event) => setNamespace(event.target.value)} onPressEnter={() => deployments.refetch()} />
+          <div className="namespace-filter"><span>Namespace</span><Input value={namespace} onChange={(event) => setNamespace(event.target.value)} onPressEnter={() => deployments.refetch()} /></div>
           <Tag icon={<Boxes size={13} />}>{deployments.data?.length ?? 0} 个部署</Tag>
         </div>
         <Table<ModelDeployment>
@@ -169,7 +169,7 @@ export function DeploymentsPage() {
         />
       </section>
 
-      <Drawer title="部署模型" width={560} open={open} onClose={() => setOpen(false)} destroyOnHidden extra={<Button type="primary" loading={create.isPending} onClick={() => form.submit()}>提交部署</Button>}>
+      <Drawer title="部署模型" size={560} open={open} onClose={() => setOpen(false)} destroyOnHidden extra={<Button type="primary" loading={create.isPending} onClick={() => form.submit()}>提交部署</Button>}>
         <p className="drawer-intro">表单会创建 `platform.xscope.io/v1alpha1` ModelDeployment。</p>
         <Form form={form} layout="vertical" onFinish={(values) => create.mutate(values)}>
           <div className="form-pair"><Form.Item name="name" label="部署名称" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="namespace" label="Namespace" rules={[{ required: true }]}><Input /></Form.Item></div>

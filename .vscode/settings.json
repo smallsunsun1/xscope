@@ -19,6 +19,8 @@
     "${workspaceFolder}/python/src"
   ],
   "typescript.tsdk": "${workspaceFolder}/web/node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "typescript.preferences.importModuleSpecifier": "relative",
   "python.analysis.exclude": [
     "**/bazel-*/**",
     "**/node_modules",

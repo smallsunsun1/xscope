@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Avatar, Badge, Button, Drawer, Dropdown, Layout, Menu, Tooltip } from "antd";
+import { Avatar, Badge, Button, Drawer, Dropdown, Layout, Menu, Spin, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import {
   Bell,
@@ -14,13 +14,14 @@ import {
   Menu as MenuIcon,
   Settings,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { api } from "./api";
-import { APIKeysPage } from "./pages/APIKeysPage";
-import { DashboardPage } from "./pages/DashboardPage";
-import { DeploymentsPage } from "./pages/DeploymentsPage";
-import { ModelsPage } from "./pages/ModelsPage";
-import { ProjectsPage } from "./pages/ProjectsPage";
+
+const APIKeysPage = lazy(() => import("./pages/APIKeysPage").then((module) => ({ default: module.APIKeysPage })));
+const DashboardPage = lazy(() => import("./pages/DashboardPage").then((module) => ({ default: module.DashboardPage })));
+const DeploymentsPage = lazy(() => import("./pages/DeploymentsPage").then((module) => ({ default: module.DeploymentsPage })));
+const ModelsPage = lazy(() => import("./pages/ModelsPage").then((module) => ({ default: module.ModelsPage })));
+const ProjectsPage = lazy(() => import("./pages/ProjectsPage").then((module) => ({ default: module.ProjectsPage })));
 
 const { Content, Sider } = Layout;
 
@@ -91,6 +92,11 @@ export function ConsoleApp() {
     refetchInterval: 15_000,
     retry: false,
   });
+  const session = useQuery({
+    queryKey: ["console-session"],
+    queryFn: api.session,
+    retry: false,
+  });
 
   useEffect(() => {
     const onHashChange = () => setPage(pageFromHash());
@@ -110,6 +116,9 @@ export function ConsoleApp() {
     models: <ModelsPage />,
     deployments: <DeploymentsPage />,
   }[page];
+  const accountName = session.data?.username || session.data?.email || "平台用户";
+  const accountEmail = session.data?.email || "已通过 OIDC 登录";
+  const avatarText = accountName.trim().slice(0, 1).toUpperCase() || "用";
 
   return (
     <Layout className="app-layout">
@@ -129,21 +138,29 @@ export function ConsoleApp() {
               </div>
             </Tooltip>
             <Tooltip title="通知"><Button type="text" shape="circle" icon={<Bell size={18} />} /></Tooltip>
-            <Dropdown menu={{ items: [{ key: "profile", label: "账户信息", disabled: true }, { key: "logout", label: "退出登录", disabled: true }] }}>
+            <Dropdown menu={{
+              items: [
+                { key: "identity", label: accountEmail, disabled: true },
+                { key: "logout", label: "退出登录" },
+              ],
+              onClick: ({ key }) => {
+                if (key === "logout") window.location.assign("/oauth2/sign_out?rd=/");
+              },
+            }}>
               <button className="account-menu">
-                <Avatar size={32}>管</Avatar>
-                <span><strong>平台管理员</strong><small>admin@local</small></span>
+                <Avatar size={32}>{avatarText}</Avatar>
+                <span><strong>{accountName}</strong><small>{accountEmail}</small></span>
                 <ChevronDown size={14} />
               </button>
             </Dropdown>
           </div>
         </header>
         <Content className="app-content">
-          <main>{content}</main>
+          <main><Suspense fallback={<div className="page-loader"><Spin size="large" /></div>}>{content}</Suspense></main>
           <footer><span>XScope Console · v0.1.0</span><span>控制面 API v1alpha1</span></footer>
         </Content>
       </Layout>
-      <Drawer className="mobile-navigation" placement="left" width={264} open={mobileNav} onClose={() => setMobileNav(false)} closable={false}>
+      <Drawer className="mobile-navigation" placement="left" size={264} open={mobileNav} onClose={() => setMobileNav(false)} closable={false}>
         <Navigation page={page} navigate={navigate} />
       </Drawer>
     </Layout>

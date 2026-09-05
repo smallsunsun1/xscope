@@ -54,7 +54,7 @@ spec:
                   required: [image, protocol]
                   properties:
                     image: { type: string }
-                    protocol: { enum: [openai, triton-grpc, custom-http] }
+                    protocol: { type: string, enum: [openai, triton-grpc, custom-http] }
                     port: { type: integer, minimum: 1, maximum: 65535, default: 8000 }
                     arguments:
                       type: array
@@ -79,7 +79,7 @@ spec:
                 rollout:
                   type: object
                   properties:
-                    strategy: { enum: [rolling, canary, blueGreen], default: rolling }
+                    strategy: { type: string, enum: [rolling, canary, blueGreen], default: rolling }
                     canaryWeight: { type: integer, minimum: 0, maximum: 100 }
                 nodeSelector:
                   type: object
@@ -94,6 +94,8 @@ spec:
                 observedGeneration: { type: integer }
                 readyReplicas: { type: integer }
                 endpoint: { type: string }
+                clusterId: { type: string }
+                region: { type: string }
                 conditions:
                   type: array
                   x-kubernetes-list-type: map
@@ -103,9 +105,8 @@ spec:
                     required: [type, status, lastTransitionTime, reason, message]
                     properties:
                       type: { type: string }
-                      status: { enum: ["True", "False", Unknown] }
+                      status: { type: string, enum: ["True", "False", Unknown] }
                       observedGeneration: { type: integer }
                       lastTransitionTime: { type: string, format: date-time }
                       reason: { type: string }
                       message: { type: string }
-

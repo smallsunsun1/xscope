@@ -9,9 +9,7 @@ license.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 chrono.workspace = true
-env_logger.workspace = true
 http.workspace = true
-log.workspace = true
 pingora-core.workspace = true
 pingora-error.workspace = true
 pingora-http.workspace = true
@@ -22,6 +20,8 @@ serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [lints]

@@ -3,6 +3,11 @@ export type Health = {
   component?: string;
 };
 
+export type Session = {
+  username: string;
+  email: string;
+};
+
 export type Money = {
   currency: string;
   amount: number;
@@ -76,6 +81,8 @@ export type ModelDeployment = {
     observedGeneration?: number;
     readyReplicas?: number;
     endpoint?: string;
+    clusterId?: string;
+    region?: string;
     conditions?: Array<{
       type: string;
       status: "True" | "False" | "Unknown";

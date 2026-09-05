@@ -30,7 +30,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	if err := (&controller.ModelDeploymentReconciler{Client: manager.GetClient(), Scheme: manager.GetScheme()}).SetupWithManager(manager); err != nil {
+	if err := (&controller.ModelDeploymentReconciler{
+		Client:    manager.GetClient(),
+		Scheme:    manager.GetScheme(),
+		ClusterID: envOr("XSCOPE_CLUSTER_ID", "local"),
+		Region:    envOr("XSCOPE_REGION", "local"),
+	}).SetupWithManager(manager); err != nil {
 		panic(err)
 	}
 	if err := manager.AddHealthzCheck("healthz", healthz.Ping); err != nil {

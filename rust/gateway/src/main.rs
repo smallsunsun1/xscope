@@ -14,10 +14,31 @@ use xscope_gateway::proxy::Gateway;
 use xscope_gateway::usage::UsageSink;
 
 fn main() {
-    env_logger::init();
+    init_tracing();
     if let Err(error) = run() {
-        log::error!("gateway failed to start: {error}");
+        tracing::error!(error = %error, "gateway failed to start");
         std::process::exit(1);
+    }
+}
+
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let format = std::env::var("XSCOPE_LOG_FORMAT").unwrap_or_else(|_| "compact".to_owned());
+
+    if format.eq_ignore_ascii_case("json") {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .compact()
+            .init();
     }
 }
 
@@ -25,7 +46,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let settings = Settings::from_env()?;
     let keys = KeySet::new(&settings.api_keys);
     if keys.is_empty() {
-        log::warn!("XSCOPE_API_KEYS_JSON is empty; readiness and inference will fail closed");
+        tracing::warn!(
+            config = "XSCOPE_API_KEYS_JSON",
+            "API key configuration is empty; readiness and inference will fail closed"
+        );
     }
 
     let mut backends = BTreeSet::new();

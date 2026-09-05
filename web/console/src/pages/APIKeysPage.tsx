@@ -85,7 +85,7 @@ export function APIKeysPage() {
           ]}
         />
       </section>
-      <Drawer title="签发 API Key" width={460} open={open} onClose={() => setOpen(false)} destroyOnHidden extra={<Button type="primary" loading={create.isPending} onClick={() => form.submit()}>签发</Button>}>
+      <Drawer title="签发 API Key" size={460} open={open} onClose={() => setOpen(false)} destroyOnHidden extra={<Button type="primary" loading={create.isPending} onClick={() => form.submit()}>签发</Button>}>
         <p className="drawer-intro">Key 将归属于所选项目和对应租户。</p>
         <Form form={form} layout="vertical" onFinish={(values) => create.mutate(values)}>
           <Form.Item name="name" label="Key 名称" rules={[{ required: true, message: "请输入名称" }]}><Input autoFocus placeholder="例如：production-gateway" /></Form.Item>

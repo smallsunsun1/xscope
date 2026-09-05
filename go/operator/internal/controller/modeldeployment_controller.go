@@ -20,7 +20,9 @@ import (
 
 type ModelDeploymentReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme    *runtime.Scheme
+	ClusterID string
+	Region    string
 }
 
 // +kubebuilder:rbac:groups=platform.xscope.io,resources=modeldeployments,verbs=get;list;watch;create;update;patch;delete
@@ -37,6 +39,12 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, request ctrl.
 		"app.kubernetes.io/name":       model.Name,
 		"app.kubernetes.io/component":  "model-runtime",
 		"app.kubernetes.io/managed-by": "xscope-operator",
+	}
+	if r.ClusterID != "" {
+		labels["platform.xscope.io/cluster-id"] = r.ClusterID
+	}
+	if r.Region != "" {
+		labels["platform.xscope.io/region"] = r.Region
 	}
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: model.Name, Namespace: model.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
@@ -91,6 +99,8 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, request ctrl.
 		ObservedGeneration: model.Generation,
 		ReadyReplicas:      deployment.Status.ReadyReplicas,
 		Endpoint:           fmt.Sprintf("http://%s.%s.svc:%d", service.Name, service.Namespace, service.Spec.Ports[0].Port),
+		ClusterID:          r.ClusterID,
+		Region:             r.Region,
 		Conditions:         model.Status.Conditions,
 	}
 	if !apiequality.Semantic.DeepEqual(model.Status, desiredStatus) {

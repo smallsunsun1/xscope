@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"xscope.dev/xscope/control-plane/internal/platform"
 )
 
@@ -71,5 +73,50 @@ func TestCreateProjectRequiresIdempotencyKey(t *testing.T) {
 	app.routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", recorder.Code)
+	}
+}
+
+func TestAdminAPIRequiresAuthenticatedProxyHeader(t *testing.T) {
+	app := &server{store: platform.NewStore(), requireConsoleAuth: true}
+	unauthenticated := httptest.NewRecorder()
+	app.routes().ServeHTTP(
+		unauthenticated,
+		httptest.NewRequest(http.MethodGet, "/api/admin/v1/session", nil),
+	)
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want 401", unauthenticated.Code)
+	}
+
+	authenticated := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/v1/session", nil)
+	request.Header.Set("X-Auth-Request-User", "platform-admin")
+	request.Header.Set("X-Auth-Request-Email", "admin@local.xscope")
+	app.routes().ServeHTTP(authenticated, request)
+	if authenticated.Code != http.StatusOK {
+		t.Fatalf("authenticated status = %d, body = %s", authenticated.Code, authenticated.Body.String())
+	}
+}
+
+func TestModelDeploymentsReportUnavailableCluster(t *testing.T) {
+	app := &server{store: platform.NewStore()}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/model-deployments", nil)
+	app.routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestMissingModelDeploymentCRDIsServiceUnavailable(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writeClusterError(recorder, &meta.NoResourceMatchError{
+		PartialResource: schema.GroupVersionResource{
+			Group:    "platform.xscope.io",
+			Version:  "v1alpha1",
+			Resource: "modeldeployments",
+		},
+	})
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }

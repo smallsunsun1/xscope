@@ -24,4 +24,12 @@ metadata:
 spec:
   selector: { app.kubernetes.io/name: runtime }
   ports: [{ name: http, port: 8090, targetPort: http }]
-
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator
+  namespace: xscope-system
+spec:
+  selector: { app.kubernetes.io/name: operator }
+  ports: [{ name: http, port: 8082, targetPort: health }]

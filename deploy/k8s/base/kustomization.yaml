@@ -1,10 +1,11 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - ../crds/modeldeployment.yaml
   - namespace.yaml
   - configmap.yaml
+  - database.yaml
+  - identity.yaml
+  - networkpolicy.yaml
   - rbac.yaml
   - workloads.yaml
   - services.yaml
-

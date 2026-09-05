@@ -6,22 +6,29 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	platformv1alpha1 "xscope.dev/xscope/api/v1alpha1"
 	"xscope.dev/xscope/control-plane/internal/cluster"
 	"xscope.dev/xscope/control-plane/internal/platform"
 )
 
 type server struct {
-	store       *platform.Store
-	deployments *cluster.Service
+	store              *platform.Store
+	deployments        *cluster.Service
+	requireConsoleAuth bool
+	consoleDirectory   string
+	componentTargets   map[string]*url.URL
 }
 
 type scaleRequest struct {
@@ -35,7 +42,17 @@ func main() {
 		slog.Warn("Kubernetes deployment management unavailable", "error", err)
 		deploymentService = cluster.Unavailable(err)
 	}
-	app := &server{store: platform.NewStore(), deployments: deploymentService}
+	app := &server{
+		store:              platform.NewStore(),
+		deployments:        deploymentService,
+		requireConsoleAuth: envOr("XSCOPE_CONSOLE_AUTH", "disabled") == "trusted-headers",
+		consoleDirectory:   os.Getenv("XSCOPE_CONSOLE_DIR"),
+		componentTargets: componentTargets(map[string]string{
+			"gateway":  envOr("XSCOPE_GATEWAY_HEALTH_URL", "http://gateway:80/healthz"),
+			"runtime":  envOr("XSCOPE_RUNTIME_HEALTH_URL", "http://runtime:8090/healthz"),
+			"operator": envOr("XSCOPE_OPERATOR_HEALTH_URL", "http://operator:8082/healthz"),
+		}),
+	}
 	httpServer := &http.Server{
 		Addr:              address,
 		Handler:           app.routes(),
@@ -55,6 +72,15 @@ func (s *server) routes() http.Handler {
 	router.Use(middleware.Recoverer)
 	router.Use(middleware.Timeout(30 * time.Second))
 	router.Use(requestContext)
+	s.registerAPI(router)
+	router.Route("/api", s.registerAPI)
+	if s.consoleDirectory != "" {
+		router.NotFound(serveConsole(s.consoleDirectory))
+	}
+	return router
+}
+
+func (s *server) registerAPI(router chi.Router) {
 	router.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "component": "control-plane"})
 	})
@@ -65,6 +91,11 @@ func (s *server) routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": s.store.ListModels()})
 	})
 	router.Route("/admin/v1", func(router chi.Router) {
+		if s.requireConsoleAuth {
+			router.Use(requireAuthenticatedUser)
+		}
+		router.Get("/session", s.session)
+		router.Get("/components/{name}/health", s.componentHealth)
 		router.Get("/projects", s.listProjects)
 		router.Post("/projects", s.createProject)
 		router.Get("/api-keys", s.listAPIKeys)
@@ -76,7 +107,43 @@ func (s *server) routes() http.Handler {
 		router.Put("/model-deployments/{namespace}/{name}/scale", s.scaleModelDeployment)
 		router.Delete("/model-deployments/{namespace}/{name}", s.deleteModelDeployment)
 	})
-	return router
+}
+
+func (s *server) session(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"username": authHeader(r, "X-Auth-Request-User", "X-Forwarded-User", "X-Forwarded-Preferred-Username"),
+		"email":    authHeader(r, "X-Auth-Request-Email", "X-Forwarded-Email"),
+	})
+}
+
+func (s *server) componentHealth(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	target, ok := s.componentTargets[name]
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "component not found")
+		return
+	}
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "could not create health request")
+		return
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "component_unavailable", err.Error())
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		writeError(w, http.StatusServiceUnavailable, "component_unavailable", response.Status)
+		return
+	}
+	var health map[string]any
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&health); err != nil {
+		writeError(w, http.StatusBadGateway, "invalid_component_response", "component returned invalid JSON")
+		return
+	}
+	writeJSON(w, http.StatusOK, health)
 }
 
 func (s *server) listProjects(w http.ResponseWriter, _ *http.Request) {
@@ -242,10 +309,16 @@ func writeClusterError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, cluster.ErrUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "cluster_unavailable", err.Error())
+	case meta.IsNoMatchError(err):
+		writeError(w, http.StatusServiceUnavailable, "deployment_api_unavailable", "ModelDeployment CRD is not installed in the cluster")
+	case apierrors.IsServiceUnavailable(err), apierrors.IsTimeout(err), apierrors.IsServerTimeout(err):
+		writeError(w, http.StatusServiceUnavailable, "cluster_unavailable", "Kubernetes API is unavailable")
 	case apierrors.IsNotFound(err):
 		writeError(w, http.StatusNotFound, "not_found", "model deployment not found")
 	case apierrors.IsAlreadyExists(err):
 		writeError(w, http.StatusConflict, "conflict", "model deployment already exists")
+	case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 	}
@@ -299,6 +372,61 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func requireAuthenticatedUser(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if authHeader(r, "X-Auth-Request-User", "X-Forwarded-User", "X-Auth-Request-Email", "X-Forwarded-Email") == "" {
+			writeError(w, http.StatusUnauthorized, "authentication_required", "console authentication is required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func authHeader(r *http.Request, names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(r.Header.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func componentTargets(values map[string]string) map[string]*url.URL {
+	targets := make(map[string]*url.URL, len(values))
+	for name, raw := range values {
+		target, err := url.Parse(raw)
+		if err != nil || target.Scheme == "" || target.Host == "" {
+			slog.Warn("ignoring invalid component health URL", "component", name, "url", raw)
+			continue
+		}
+		targets[name] = target
+	}
+	return targets
+}
+
+func serveConsole(directory string) http.HandlerFunc {
+	root, err := filepath.Abs(directory)
+	if err != nil {
+		slog.Warn("console directory is invalid", "directory", directory, "error", err)
+		return func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "console unavailable", http.StatusServiceUnavailable)
+		}
+	}
+	index := filepath.Join(root, "index.html")
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join(root, filepath.Clean("/"+r.URL.Path))
+		if path != root && !strings.HasPrefix(path, root+string(os.PathSeparator)) {
+			http.NotFound(w, r)
+			return
+		}
+		if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() {
+			http.ServeFile(w, r, path)
+			return
+		}
+		http.ServeFile(w, r, index)
+	}
 }
 
 func envOr(name, fallback string) string {
