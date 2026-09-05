@@ -1,7 +1,10 @@
 pub mod api_key;
 pub mod billing_account;
+pub mod billing_balance;
 pub mod billing_consumer;
 pub mod billing_event;
+pub mod billing_key_hold;
+pub mod billing_month_spend;
 pub mod billing_order;
 pub mod billing_reservation;
 pub mod idempotency_record;

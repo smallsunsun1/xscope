@@ -1,8 +1,8 @@
 use std::collections::{BTreeSet, HashMap};
-use std::error::Error;
 use std::net::ToSocketAddrs;
 use std::time::Duration;
 
+use anyhow::{Context, Result};
 use pingora_core::prelude::{Opt, Server, background_service};
 use pingora_load_balancing::discovery::Static;
 use pingora_load_balancing::health_check::TcpHealthCheck;
@@ -16,15 +16,22 @@ use xscope_gateway::quota::QuotaManager;
 use xscope_gateway::usage::UsageSink;
 
 fn main() {
-    let _telemetry = xscope_telemetry::init("xscope-gateway").expect("telemetry initialization");
     if let Err(error) = run() {
-        tracing::error!(error = %error, "gateway failed to start");
+        tracing::error!(error = ?error, "gateway failed to start");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
-    let settings = Settings::from_env()?;
+fn run() -> Result<()> {
+    let _telemetry =
+        xscope_telemetry::init("xscope-gateway").context("initialize gateway telemetry")?;
+    let settings = Settings::from_env().context("load gateway configuration")?;
+    let storage_settings = xscope_gateway::storage::StorageSettings::from_env()
+        .context("load gateway WAL storage settings")?;
+    let storage = xscope_gateway::storage::StorageBudget::new(
+        std::path::Path::new(&settings.usage_wal),
+        storage_settings,
+    );
     let keys = DynamicKeySet::new(&settings.api_keys);
     if keys.is_empty() {
         tracing::warn!(
@@ -44,15 +51,22 @@ fn run() -> Result<(), Box<dyn Error>> {
         tracing::warn!("Redis quota is disabled; using per-process RPM fallback without TPM");
     }
 
-    let mut server = Server::new(Some(Opt::default()))?;
+    let mut server = Server::new(Some(Opt::default())).context("create Pingora server")?;
     server.bootstrap();
     let mut transports = HashMap::new();
     for pool in std::iter::once(&settings.serving).chain(&settings.additional_serving) {
         let mut backends = BTreeSet::new();
         // Only transport addresses of a pool's serving entry, never model Pods.
         // Replica selection remains exclusively owned by that pool's EPP.
-        for address in pool.address.to_socket_addrs()? {
-            backends.insert(Backend::new(&address.to_string())?);
+        for address in pool
+            .address
+            .to_socket_addrs()
+            .with_context(|| format!("resolve serving pool {} address", pool.id))?
+        {
+            backends.insert(
+                Backend::new(&address.to_string())
+                    .with_context(|| format!("create serving backend for pool {}", pool.id))?,
+            );
         }
         let discovered = Backends::new(Static::new(backends));
         let mut load_balancer = LoadBalancer::<RoundRobin>::from_backends(discovered);
@@ -71,13 +85,17 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let billing = if settings.billing_reservations {
-        Some(BillingAdmission::open(
-            std::path::Path::new(&settings.usage_wal),
-            settings.control_internal_url.clone(),
-            settings.internal_token.clone(),
-            settings.model_context_tokens,
-            settings.price_version.clone(),
-        )?)
+        Some(
+            BillingAdmission::open(
+                std::path::Path::new(&settings.usage_wal),
+                settings.control_internal_url.clone(),
+                settings.internal_token.clone(),
+                settings.model_context_tokens,
+                settings.price_version.clone(),
+                storage.clone(),
+            )
+            .context("open billing reservation WAL")?,
+        )
     } else {
         None
     };
@@ -95,7 +113,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             )
         },
         settings.internal_token,
-    )?;
+        storage,
+    )
+    .context("open usage event WAL")?;
     let gateway = Gateway {
         transports,
         serving: settings.serving,

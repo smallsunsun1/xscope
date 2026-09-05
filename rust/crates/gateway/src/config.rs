@@ -172,6 +172,8 @@ impl ServingConfig {
 }
 
 #[cfg(test)]
+// Test fixture setup and response assertions deliberately panic at the failing boundary.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::ServingConfig;
 

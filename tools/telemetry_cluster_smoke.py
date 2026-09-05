@@ -6,6 +6,7 @@ import socket
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -80,6 +81,16 @@ def main():
             return selected if {"gateway", "control-plane", "operator", "cluster-agent", "runtime"} <= components and {"envoy", "epp"} <= jobs and all(t["health"] == "up" for t in selected) else None
         targets = wait(targets_up)
         print("PASS: all", len(targets), "per-pod Prometheus targets are UP")
+        def wal_capacity_visible():
+            query = urllib.parse.urlencode({"query": 'xscope_wal_storage_bytes{component="gateway"}'})
+            result = get(prometheus + "/api/v1/query?" + query)["data"]["result"]
+            values = {row["metric"]["kind"]: float(row["value"][1]) for row in result}
+            required = {"retained", "reserved", "free", "limit", "free_floor"}
+            if not required <= values.keys():
+                return None
+            return values if values["retained"] > 0 and values["limit"] > values["retained"] and values["free"] > values["free_floor"] else None
+        storage = wait(wal_capacity_visible)
+        print("PASS: Gateway WAL storage metrics", json.dumps(storage, sort_keys=True))
     finally:
         for forward in forwards:
             forward.terminate()

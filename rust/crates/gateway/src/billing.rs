@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use xscope_domain::billing::ReserveRequest;
 
-use crate::wal::Journal;
+use crate::segments::Journal;
+use crate::storage::{StorageBudget, StoragePermit};
 
 pub struct BillingAdmission {
     sender: SyncSender<Command>,
@@ -39,6 +40,7 @@ struct Intent {
 }
 
 struct Command {
+    _space: Arc<StoragePermit>,
     intent: Intent,
     reply: oneshot::Sender<Result<(), u16>>,
 }
@@ -71,10 +73,11 @@ impl BillingAdmission {
         token: String,
         context_tokens: i64,
         price_version: String,
+        storage: Arc<StorageBudget>,
     ) -> io::Result<Self> {
         let mut path = usage_path.as_os_str().to_owned();
         path.push(".reservations.jsonl");
-        let journal = Journal::open(Path::new(&path))?;
+        let journal = Journal::open(Path::new(&path), storage)?;
         let healthy = Arc::new(AtomicBool::new(false));
         let health = healthy.clone();
         let (sender, receiver) = mpsc::sync_channel::<Command>(64);
@@ -121,7 +124,9 @@ impl BillingAdmission {
                     journal.append(&serde_json::to_vec(&command.intent)?)?;
                     let decision = protocol.admit(&command);
                     if !matches!(decision, Decision::Uncertain(_)) {
-                        let record = journal.next()?.expect("just appended intent");
+                        let record = journal.next()?.ok_or_else(|| {
+                            io::Error::other("admission intent disappeared after durable append")
+                        })?;
                         journal.acknowledge(&record)?;
                     } else {
                         health.store(false, Ordering::Release);
@@ -155,6 +160,7 @@ impl BillingAdmission {
         &self,
         request: ReserveRequest,
         trace_headers: http::HeaderMap,
+        space: Arc<StoragePermit>,
     ) -> Result<Ticket, u16> {
         if !self.is_healthy() {
             return Err(503);
@@ -168,6 +174,7 @@ impl BillingAdmission {
         let (reply, receive) = oneshot::channel();
         self.sender
             .try_send(Command {
+                _space: space,
                 intent: Intent {
                     version: 1,
                     request,

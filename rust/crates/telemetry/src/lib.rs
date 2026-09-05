@@ -2,6 +2,7 @@
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use anyhow::{Context, Result, anyhow};
 use http::HeaderMap;
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry::trace::{TraceContextExt, TracerProvider};
@@ -13,8 +14,6 @@ use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-type InitError = Box<dyn std::error::Error + Send + Sync>;
-
 pub struct Telemetry(SdkTracerProvider);
 
 impl Drop for Telemetry {
@@ -24,7 +23,7 @@ impl Drop for Telemetry {
 }
 
 /// Run exporter construction outside Tokio: the blocking HTTP exporter owns its runtime.
-pub fn init(service: &'static str) -> Result<Telemetry, InitError> {
+pub fn init(service: &'static str) -> Result<Telemetry> {
     // kube-rs and the OTLP HTTP exporter may enable different Rustls backends.
     // Select one explicitly rather than relying on ambiguous feature inference.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -62,10 +61,10 @@ pub fn init(service: &'static str) -> Result<Telemetry, InitError> {
         Ok(Telemetry(provider))
     })
     .join()
-    .map_err(|_| "telemetry initialization thread panicked")?
+    .map_err(|_| anyhow!("telemetry initialization thread panicked"))?
 }
 
-fn start_metrics_server() -> Result<(), InitError> {
+fn start_metrics_server() -> Result<()> {
     let Ok(address) = std::env::var("XSCOPE_METRICS_ADDRESS") else {
         return Ok(());
     };
@@ -74,10 +73,16 @@ fn start_metrics_server() -> Result<(), InitError> {
     std::thread::Builder::new()
         .name("metrics".into())
         .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
+            let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("metrics runtime");
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::error!(%error, "metrics runtime could not be created");
+                    return;
+                }
+            };
             runtime.block_on(async {
                 let router = axum::Router::new().route(
                     "/metrics",
@@ -88,16 +93,19 @@ fn start_metrics_server() -> Result<(), InitError> {
                         )
                     }),
                 );
-                if let Err(error) = axum::serve(
-                    tokio::net::TcpListener::from_std(listener).expect("metrics socket"),
-                    router,
-                )
-                .await
-                {
+                let listener = match tokio::net::TcpListener::from_std(listener) {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        tracing::error!(%error, "metrics socket could not join Tokio runtime");
+                        return;
+                    }
+                };
+                if let Err(error) = axum::serve(listener, router).await {
                     tracing::error!(%error, "metrics listener stopped");
                 }
             });
-        })?;
+        })
+        .context("spawn metrics server thread")?;
     Ok(())
 }
 
@@ -248,7 +256,11 @@ struct Metrics {
     pub events: IntCounterVec,
     tokens: IntCounterVec,
     routes: IntCounterVec,
+    wal_storage: IntGaugeVec,
 }
+// Metric names, help strings and label sets are compile-time constants; each
+// descriptor is unique in this private registry, so construction/registration cannot fail.
+#[allow(clippy::unwrap_used)]
 static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let registry = Registry::new();
     let requests = IntCounterVec::new(
@@ -303,7 +315,16 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         &["pool", "reason"],
     )
     .unwrap();
+    let wal_storage = IntGaugeVec::new(
+        Opts::new(
+            "xscope_wal_storage_bytes",
+            "Gateway retained data, in-flight space reservations and filesystem watermarks",
+        ),
+        &["kind"],
+    )
+    .unwrap();
     for collector in [
+        Box::new(wal_storage.clone()) as Box<dyn prometheus::core::Collector>,
         Box::new(requests.clone()) as Box<dyn prometheus::core::Collector>,
         Box::new(inflight.clone()),
         Box::new(duration.clone()),
@@ -315,6 +336,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         registry.register(collector).unwrap();
     }
     Metrics {
+        wal_storage,
         registry,
         requests,
         inflight,
@@ -332,6 +354,22 @@ pub fn background_event(operation: &'static str, outcome: &'static str) {
         .with_label_values(&[operation, outcome])
         .inc();
 }
+
+/// Bounded labels, sampled when Gateway checks admission/readiness.
+pub fn wal_storage(retained: u64, reserved: u64, free: u64, limit: u64, floor: u64) {
+    for (kind, value) in [
+        ("retained", retained),
+        ("reserved", reserved),
+        ("free", free),
+        ("limit", limit),
+        ("free_floor", floor),
+    ] {
+        METRICS
+            .wal_storage
+            .with_label_values(&[kind])
+            .set(i64::try_from(value).unwrap_or(i64::MAX));
+    }
+}
 pub fn tokens(input: u64, output: u64) {
     METRICS.tokens.with_label_values(&["input"]).inc_by(input);
     METRICS.tokens.with_label_values(&["output"]).inc_by(output);
@@ -343,13 +381,18 @@ pub fn route_selected(pool: &str, reason: &'static str) {
 }
 pub fn metrics_text() -> String {
     let mut output = Vec::new();
-    prometheus::TextEncoder::new()
-        .encode(&METRICS.registry.gather(), &mut output)
-        .expect("metrics encode");
-    String::from_utf8(output).expect("metrics UTF-8")
+    if let Err(error) =
+        prometheus::TextEncoder::new().encode(&METRICS.registry.gather(), &mut output)
+    {
+        tracing::error!(%error, "metrics encoding failed");
+        return String::new();
+    }
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 #[cfg(test)]
+// Test fixture setup and response assertions deliberately panic at the failing boundary.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     #[test]

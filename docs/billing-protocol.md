@@ -16,7 +16,7 @@ dispatched ── 用量未知 / 超过预占上限 ──> 保持冻结，等�
 
 - 预占在项目 billing_account 行锁内计算 `已入账余额 - 活跃预占`。开启 enforce_balance 时不足返回 402；未开启时允许后付费负余额。
 - 同一锁保护 API Key 月预算检查：已计量费用 + 尚未解决的预占 + 新预占不能超过预算。旧月份未解决的冻结额也保守计入；不存在基于内存快照的预占竞态。
-- 当前余额和冻结额由数据库聚合，不把完整账本/预占列表加载到应用内存。相关账户、Key、请求查询具备索引。
+- 余额/冻结额和 Key 月费用使用同一事务内的增量汇总，缺失时账户锁内回填，初始化后不再逐请求扫描历史；Gateway 快照也批量读汇总。校验/修复、旧写入者排除与归档限制见 [汇总协议](billing-projections.md)，生产容量边界见 [容量分析](billing-capacity.md)。
 - reservation ID 与完整请求绑定；重试相同 payload 返回同一记录，不同 payload 返回 409。同一个 project/request_id 不能创建第二个 reservation，也不能用于已入库的普通用量。
 - release 只允许 `reserved` 且 reason 为 `not_dispatched`。已派发、已结算不能释放；未知用量不能伪装成零费用自动释放。
 - settle 只允许 `dispatched`，接受明确已知的 succeeded/cancelled/provider_error 用量；已知的部分取消用量也计费。实际 token 超过预占上限返回 409，冻结额保留，需对账处理。
@@ -35,7 +35,7 @@ dispatched ── 用量未知 / 超过预占上限 ──> 保持冻结，等�
 - 完成后写同一持久卷上的 v2 usage WAL。已知用量走冻结价格 settle；提交后丢 ACK 使用同一 payload 重试。旧 v1 WAL 继续走原 usage-events 接口，不改写或丢弃历史记录。共享 Rust domain DTO 避免两端契约漂移。
 - 用量未知或超过预占上限的 v2 记录不作零结算：确认 PostgreSQL 中仍有 dispatched 记录后推进投递 checkpoint，保留原 WAL 证据和数据库冻结，不阻塞后续正常结算。此 ACK 仅表示待对账状态已持久化，**不表示已结算**。日志/`billing_pending` 指标提示人工处理；尚无待对账审批接口或自动估价扣款。
 - 存储故障停止新准入。已 dispatch 但尚未写最终 WAL 就崩溃的请求仍有数据库冻结保护，但实际用量可能无法恢复，需供应商证据对账。没有按超时自动释放的定时器。
-- 本地继续使用单副本 Recreate + 原 PVC，新增一个低开销线程，不增加 Pod/CPU request。多 Gateway 共享资金约束已用真实进程测试，但生产多副本仍需**每副本独立持久卷**；禁止两个副本共享 WAL。日志暂未分段/压缩，需监控磁盘容量。
+- 本地继续使用单副本 Recreate + 原 PVC，新增一个低开销线程，不增加 Pod/CPU request。多 Gateway 共享资金约束已用真实进程测试，但生产多副本仍需**每副本独立持久卷**；禁止两个副本共享 WAL。已补已 ACK 日志本地分段封存、共享在途空间预算和磁盘水位准入；尚无远程归档、压缩或自动清理。见 [WAL 存储边界](wal-storage.md)。
 
 ## 内部接口
 
@@ -45,10 +45,11 @@ dispatched ── 用量未知 / 超过预占上限 ──> 保持冻结，等�
 | --- | --- |
 | `POST /reservations` | 幂等资金预占 |
 | `GET /projects/{project}/reservations/{id}` | 故障后查询持久化状态 |
+| `GET /projects/{project}/pending-reservations` | 按年龄与游标分页发现 dispatched 未决预占；只读 |
 | `POST /projects/{project}/reservations/{id}/dispatch` | 标记可能已经派发；无业务请求体 |
 | `POST /projects/{project}/reservations/{id}/release` | 释放确定未派发的预占 |
 | `POST /projects/{project}/reservations/{id}/settle` | 按冻结报价结算已知用量 |
-| `POST /projects/{project}/consumers/{consumer}/poll` | 拉取尚未 ACK 的事件，limit 1–100 |
+| `POST /projects/{project}/consumers/{consumer}/poll` | 拉取尚未 ACK 的事件，limit 1–100，可携带上一批 ACK |
 | `POST /projects/{project}/consumers/{consumer}/ack` | CAS 推进持久化消费位置 |
 
 Reserve 请求示例（测试项目/Key 必须先存在）：
@@ -84,12 +85,34 @@ Release 请求为 `{"reason":"not_dispatched"}`。参数缺失/类型不正确�
 
 消费流程：
 
-1. `poll {"limit":50}` 返回 data、acknowledged、delivered。未 ACK 时重复 poll 仍返回该批事件。
+1. `poll {"limit":50}` 返回 data、acknowledged、delivered、has_more、retry_after_ms。未 ACK 时重复 poll 仍返回该批事件。
 2. 消费者按序处理并以 `(billing_account_id, sequence)` 去重，再调用 `ack {"expected_sequence":旧ack,"sequence":已连续完成的位置}`。
 3. ACK 不得倒退或超过实际投递位置；过期 CAS 返回 409。丢回复后重试同一个已完成 ACK 可返回成功。
 4. 控制面重启后进度仍保留。一个 consumer 名称对应一个有序处理者；多个独立订阅使用不同名称。
 
+处理完上一批后，可用一次请求同时 ACK 并获取下一批：
+
+```json
+{"limit":100,"ack":{"expected_sequence":0,"sequence":100}}
+```
+
+两项进度在一个事务中提交、最多更新一次游标。只能 ACK **之前已投递并连续处理完成** 的事件，不能预先确认下一批。丢回复后重试同一请求不会再次更新已确认的位置；仍返回当前未 ACK 的数据。独立 ACK 接口继续兼容。
+
+已有消费者的空轮询、没有推进 delivered 的重投和重复 ACK 不执行 UPDATE，也不获取行级排他锁。只有进度推进才锁定 `(billing_account_id, consumer)` 这一行，重新读取并验证 CAS；不再锁资金账户。同一账户的不同消费者独立推进。首次注册需要插入游标，可能等待账户外键检查，不能把首次注册说成完全无锁。`updated_at` 表示进度/注册时间，**不再是轮询心跳**。
+
+事件生产者仍从序号分配到提交持有账户锁，避免消费者越过未提交事件。无变更响应可能落后于并发 ACK，这符合至少一次投递；不要让同一个 consumer 的多个进程未经协调地执行非幂等副作用。
+
+空页返回 `retry_after_ms=1000`；这是调用方的最小退避提示，不是服务端自动调度器。消费端应使用带抖动的递增退避（例如 1–30 秒），避免 1 万个闲置账户每秒全量轮询。`has_more=true` 可继续批量追赶；不得先 ACK 再处理事件。
+
 本协议提供至少一次投递。消费者自己的外部副作用仍需幂等处理，不能把数据库事务延伸到外部支付或消息系统。事件表只追加，尚无自动归档/保留期策略；也还不是防管理员篡改的审计存储。
+
+## 未决预占发现
+
+`GET /internal/v1/billing/projects/{project}/pending-reservations?limit=50` 默认列出创建超过 5 分钟、仍为 dispatched 的记录。可指定 RFC3339 `created_before`（不得晚于当前时间）。按 `(created_at,id)` 升序 keyset 分页，返回的 `next` 含 `after_created_at`、`after_id` 和固定的 `created_before`；下一页原样携带这三个参数及 limit，不用 OFFSET。没有下一页时 `next=null`。半截游标或超出 1–100 的 limit 返回 400。
+
+这是等待对账的发现接口，不是供应商证据采集或审批接口。创建时间不等于派发时间；老请求也可能仍在运行。`requires_usage_evidence=true` 提醒调用方：只读查询不会释放、扣款或把未知用量设为零。跨页不是数据库快照，期间已经结算的请求会离开结果；定期重新扫描以发现迟到的状态变化。
+
+迁移 000006 只新增 `(billing_account_id,state,created_at,id)` 索引，不改写历史。当前本地小表使用事务内普通建索引；**生产大表需要单独设计在线建索引/变更窗口**，不能直接把此启动迁移用于海量历史表。
 
 ## Bazel 验收与部署
 
@@ -107,12 +130,19 @@ bazel run //tools:deploy_gateway_billing
 bazel run //tools:billing_protocol_cluster_check
 bazel run //tools:inference_cluster_smoke
 bazel run //tools:telemetry_cluster_smoke
+
+# 本轮游标优化及未决查询，只更新控制面
+./tools/bazel-linux.sh images control-plane
+bazel run //tools:deploy_billing_protocol
+bazel run //tools:billing_protocol_cluster_check
 ```
 
 隔离测试使用已有 postgres:16-alpine 镜像，临时容器限额 0.5 CPU / 192 MiB，结束后清理。覆盖八路跨实例余额/预算竞争、重复和冲突、退款冻结保护、部分取消费用、旧用量入口拒绝双重结算、Outbox 写失败后的全事务回滚、重启后的冻结状态与 ACK 恢复。双 Gateway 测试验证八路并发只允许一个 Runtime 请求，其余七个 402；相同客户端关联 ID 的两次成功请求各自产生一笔平衡分录。
 
-首次控制面部署脚本 `deploy_billing_protocol` 先把 xscope 业务 schema 备份至权限受限的 `.build/billing-backup-*`，再滚动更新控制面。Gateway 部署脚本备份现有两个 WAL/已有 checkpoints 至 `.build/gateway-billing-backup-*`，以 Recreate 更新单写者并启用开关；推理入口会短暂不可用。两者均不清空业务、Keycloak、Redis、WAL 或 PVC。
+新增测试持有真实账户/消费者行锁，验证读侧隔离、相互不阻塞、未提交事件不可 ACK；验证并发首次注册、ACK CAS、合并拉取的重试、同时间戳的未决分页、鉴权与账户隔离。另建 1 万测试账户/10 万事件执行 1,000 次空轮询，检查所有探测游标的元组版本和时间戳不变。该探测不是生产吞吐认证，详见容量说明。
+
+控制面部署脚本 `deploy_billing_protocol` 现在先停止旧控制面写入者，再把 xscope 业务 schema 备份至权限受限的 `.build/billing-backup-*`，启动新控制面并验证新增表。增量汇总不能与旧非投影版本混跑，这不是普通无停机滚动更新。Gateway 部署脚本复制整棵 WAL 目录（包括分段/checkpoint/manifest/seal）至 `.build/gateway-billing-backup-*`，以 Recreate 更新单写者并校验已有数据前缀。Gateway 的运行中副本不是跨文件原子恢复点。两种切换均会短暂影响新推理准入，但不清空业务、Keycloak、Redis、WAL 或 PVC。
 
 ## 下一步
 
-第 5 阶段继续保持未完成：待补未决请求的供应商证据/审批对账、分段 WAL/归档和磁盘水位门禁、每副本持久卷、生产事件消费者。当前 UI 没有冻结余额/预占管理页面；不提前宣称正式支付、税务发票或完整财务对账已接入。
+第 5 阶段继续保持未完成：待补未决请求的供应商证据/审批对账、WAL 远程归档与可证明安全的回收、每副本持久卷、生产事件消费者。当前 UI 没有冻结余额/预占管理页面；不提前宣称正式支付、税务发票或完整财务对账已接入。

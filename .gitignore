@@ -4,6 +4,8 @@ python/.venv/
 web/node_modules/
 web/package-lock.json
 web/console/dist/
+web/console/test-results/
+web/console/playwright-report/
 web/.vite/
 /.idea
 __pycache__/

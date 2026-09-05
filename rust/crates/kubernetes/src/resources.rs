@@ -27,14 +27,14 @@ pub fn desired_optional(
     let labels = deployment
         .spec
         .as_ref()
-        .unwrap()
+        .ok_or_else(|| Error::Invalid("desired Deployment spec is missing".into()))?
         .template
         .metadata
         .as_ref()
-        .unwrap()
+        .ok_or_else(|| Error::Invalid("desired Pod template metadata is missing".into()))?
         .labels
         .as_ref()
-        .unwrap();
+        .ok_or_else(|| Error::Invalid("desired Pod template labels are missing".into()))?;
     let pdb = model
         .spec
         .disruption_budget
@@ -152,6 +152,8 @@ where
 }
 
 #[cfg(test)]
+// Test fixture setup and response assertions deliberately panic at the failing boundary.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::api::{AutoscalingSpec, DisruptionBudgetSpec, ServingSpec};

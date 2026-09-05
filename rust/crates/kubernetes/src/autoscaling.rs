@@ -250,6 +250,8 @@ pub fn desired(
 }
 
 #[cfg(test)]
+// Test fixture setup and response assertions deliberately panic at the failing boundary.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::api::{AutoscalingSpec, ServingSpec};

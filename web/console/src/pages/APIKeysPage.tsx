@@ -1,10 +1,11 @@
+import { t, useI18n, useLocalizedForm } from "../i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App, Button, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Table, Tag, Tooltip } from "antd";
 import { Check, Copy, KeyRound, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api, errorMessage } from "../api";
 import { PageHeader, ResourceEmpty } from "../components";
-import { formatDate, formatMoney } from "../format";
+import { formatDate, formatMoney, formatNumber } from "../format";
 import type { APIKey, IssuedAPIKey } from "../types";
 
 type KeyForm = {
@@ -19,16 +20,18 @@ type KeyForm = {
   monthly_budget_yuan: number;
 };
 
-const statusTag = {
-  active: <Tag color="success">有效</Tag>,
-  expired: <Tag color="warning">已过期</Tag>,
-  revoked: <Tag>已撤销</Tag>,
-};
+const statusTag = () => ({
+  active: <Tag color="success">{t("有效")}</Tag>,
+  expired: <Tag color="warning">{t("已过期")}</Tag>,
+  revoked: <Tag>{t("已撤销")}</Tag>,
+});
 
 export function APIKeysPage() {
+  useI18n();
   const { message } = App.useApp();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<KeyForm>();
+  useLocalizedForm(form);
   const [open, setOpen] = useState(false);
   const [issued, setIssued] = useState<IssuedAPIKey>();
   const [copied, setCopied] = useState(false);
@@ -38,7 +41,7 @@ export function APIKeysPage() {
   const create = useMutation({
     mutationFn: async (values: KeyForm) => {
       const project = projects.data?.find((item) => item.id === values.project_id);
-      if (!project) throw new Error("请选择有效项目");
+      if (!project) throw new Error(t("请选择有效项目"));
       const expiresAt = values.expires_in_days
         ? new Date(Date.now() + values.expires_in_days * 86_400_000).toISOString()
         : undefined;
@@ -67,7 +70,7 @@ export function APIKeysPage() {
     mutationFn: api.revokeAPIKey,
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["api-keys"] });
-      message.success("API Key 已撤销；网关将在 5 秒内停止接受它");
+      message.success(t("API Key 已撤销；网关将在 5 秒内停止接受它"));
     },
     onError: (error) => message.error(errorMessage(error)),
   });
@@ -94,8 +97,8 @@ export function APIKeysPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Access" title="API Keys" description="按项目限制权限、模型、有效期、请求速率与月度预算；网关动态消费哈希策略快照。" action={<Button type="primary" icon={<Plus size={16} />} disabled={!projects.data?.length} onClick={showCreate}>签发 Key</Button>} />
-      {!projects.isLoading && !projects.data?.length && <div className="inline-notice"><ShieldCheck size={18} /><span>请先创建项目，再为项目签发 API Key。</span></div>}
+      <PageHeader eyebrow="Access" title="API Keys" description={t("按项目限制权限、模型、有效期、请求速率与月度预算；网关动态消费哈希策略快照。")} action={<Button type="primary" icon={<Plus size={16} />} disabled={!projects.data?.length} onClick={showCreate}>{t("签发 Key")}</Button>} />
+      {!projects.isLoading && !projects.data?.length && <div className="inline-notice"><ShieldCheck size={18} /><span>{t("请先创建项目，再为项目签发 API Key。")}</span></div>}
       <section className="panel table-panel">
         <Table<APIKey>
           rowKey="id"
@@ -103,53 +106,53 @@ export function APIKeysPage() {
           dataSource={keys.data}
           scroll={{ x: 1080 }}
           pagination={{ pageSize: 8, hideOnSinglePage: true }}
-          locale={{ emptyText: <ResourceEmpty title="没有 API Key" description="签发后，Key 可用于调用 Pingora 网关。" actionLabel={projects.data?.length ? "签发 Key" : undefined} onAction={showCreate} /> }}
+          locale={{ emptyText: <ResourceEmpty title={t("没有 API Key")} description={t("签发后，Key 可用于调用 Pingora 网关。")} actionLabel={projects.data?.length ? t("签发 Key") : undefined} onAction={showCreate} /> }}
           columns={[
-            { title: "名称", dataIndex: "name", fixed: "left", width: 190, render: (name: string, record) => <div className="primary-cell"><span className="table-icon amber"><KeyRound size={16} /></span><span><strong>{name}</strong><small>{record.id}</small></span></div> },
-            { title: "项目", dataIndex: "project_id", width: 150, render: (value: string) => <code className="soft-code">{value}</code> },
-            { title: "允许模型", dataIndex: "allowed_models", width: 180, render: (values: string[]) => values.map((value) => <Tag key={value}>{value}</Tag>) },
-            { title: "速率", width: 150, render: (_, record) => <><div>{record.rate_limit_rpm} RPM</div><small>{record.rate_limit_tpm.toLocaleString()} TPM</small></> },
-            { title: "月度预算", dataIndex: "monthly_budget", width: 120, render: (value: APIKey["monthly_budget"]) => value.amount ? formatMoney(value.amount, value.currency) : "不限" },
-            { title: "到期时间", dataIndex: "expires_at", width: 170, render: (value?: string) => value ? formatDate(value) : "永不过期" },
-            { title: "状态", dataIndex: "status", width: 100, render: (value: APIKey["status"]) => statusTag[value] },
+            { title: t("名称"), dataIndex: "name", fixed: "left", width: 190, render: (name: string, record) => <div className="primary-cell"><span className="table-icon amber"><KeyRound size={16} /></span><span><strong>{name}</strong><small>{record.id}</small></span></div> },
+            { title: t("项目"), dataIndex: "project_id", width: 150, render: (value: string) => <code className="soft-code">{value}</code> },
+            { title: t("允许模型"), dataIndex: "allowed_models", width: 180, render: (values: string[]) => values.map((value) => <Tag key={value}>{value}</Tag>) },
+            { title: t("速率"), width: 150, render: (_, record) => <><div>{record.rate_limit_rpm} RPM</div><small>{formatNumber(record.rate_limit_tpm)} TPM</small></> },
+            { title: t("月度预算"), dataIndex: "monthly_budget", width: 120, render: (value: APIKey["monthly_budget"]) => value.amount ? formatMoney(value.amount, value.currency) : t("不限") },
+            { title: t("到期时间"), dataIndex: "expires_at", width: 170, render: (value?: string) => value ? formatDate(value) : t("永不过期") },
+            { title: t("状态"), dataIndex: "status", width: 100, render: (value: APIKey["status"]) => statusTag()[value] },
             {
-              title: "操作", width: 80, fixed: "right", align: "right",
+              title: t("操作"), width: 80, fixed: "right", align: "right",
               render: (_, record) => record.status === "active" ? (
-                <Popconfirm title="撤销 API Key？" description="策略同步后，使用该 Key 的请求会立即失败。" okText="撤销" cancelText="取消" okButtonProps={{ danger: true }} onConfirm={() => revoke.mutate(record.id)}>
-                  <Tooltip title="撤销"><Button danger type="text" icon={<Trash2 size={16} />} /></Tooltip>
+                <Popconfirm title={t("撤销 API Key？")} description={t("策略同步后，使用该 Key 的请求会立即失败。")} okText={t("撤销")} cancelText={t("取消")} okButtonProps={{ danger: true }} onConfirm={() => revoke.mutate(record.id)}>
+                  <Tooltip title={t("撤销")}><Button danger type="text" icon={<Trash2 size={16} />} /></Tooltip>
                 </Popconfirm>
               ) : null,
             },
           ]}
         />
       </section>
-      <Drawer title="签发 API Key" size={520} open={open} onClose={() => setOpen(false)} destroyOnHidden extra={<Button type="primary" loading={create.isPending} onClick={() => form.submit()}>签发</Button>}>
-        <p className="drawer-intro">策略在控制面持久化，网关仅消费不含明文密钥的哈希快照。</p>
+      <Drawer title={t("签发 API Key")} size={520} open={open} onClose={() => setOpen(false)} destroyOnHidden extra={<Button type="primary" loading={create.isPending} onClick={() => form.submit()}>{t("签发")}</Button>}>
+        <p className="drawer-intro">{t("策略在控制面持久化，网关仅消费不含明文密钥的哈希快照。")}</p>
         <Form form={form} layout="vertical" onFinish={(values) => create.mutate(values)}>
-          <Form.Item name="name" label="Key 名称" rules={[{ required: true, message: "请输入名称" }]}><Input autoFocus placeholder="例如：production-gateway" /></Form.Item>
-          <Form.Item name="project_id" label="所属项目" rules={[{ required: true, message: "请选择项目" }]}>
-            <Select placeholder="选择项目" options={projects.data?.map((project) => ({ label: `${project.name} · ${project.id}`, value: project.id }))} />
+          <Form.Item name="name" label={t("Key 名称")} rules={[{ required: true, message: t("请输入名称") }]}><Input autoFocus placeholder={t("例如：production-gateway")} /></Form.Item>
+          <Form.Item name="project_id" label={t("所属项目")} rules={[{ required: true, message: t("请选择项目") }]}>
+            <Select placeholder={t("选择项目")} options={projects.data?.map((project) => ({ label: `${project.name} · ${project.id}`, value: project.id }))} />
           </Form.Item>
-          <Form.Item name="allowed_models" label="允许模型" rules={[{ required: true, message: "至少允许一个模型" }]}>
+          <Form.Item name="allowed_models" label={t("允许模型")} rules={[{ required: true, message: t("至少允许一个模型") }]}>
             <Select mode="multiple" options={models.data?.map((model) => ({ label: model.display_name, value: model.id }))} />
           </Form.Item>
-          <Form.Item name="scopes" label="权限 Scope" rules={[{ required: true }]}>
+          <Form.Item name="scopes" label={t("权限 Scope")} rules={[{ required: true }]}>
             <Select mode="multiple" options={[{ label: "Chat Completions", value: "chat.completions" }]} />
           </Form.Item>
           <div className="form-pair">
-            <Form.Item name="rate_limit_rpm" label="每分钟请求数" rules={[{ required: true }]}><InputNumber min={1} max={1_000_000} precision={0} /></Form.Item>
-            <Form.Item name="rate_limit_tpm" label="每分钟 Token 数" rules={[{ required: true }]}><InputNumber min={1} max={10_000_000_000} precision={0} /></Form.Item>
+            <Form.Item name="rate_limit_rpm" label={t("每分钟请求数")} rules={[{ required: true }]}><InputNumber min={1} max={1_000_000} precision={0} /></Form.Item>
+            <Form.Item name="rate_limit_tpm" label={t("每分钟 Token 数")} rules={[{ required: true }]}><InputNumber min={1} max={10_000_000_000} precision={0} /></Form.Item>
           </div>
           <div className="form-pair">
-            <Form.Item name="expires_in_days" label="有效天数（0 为永久）" rules={[{ required: true }]}><InputNumber min={0} max={3650} precision={0} /></Form.Item>
+            <Form.Item name="expires_in_days" label={t("有效天数（0 为永久）")} rules={[{ required: true }]}><InputNumber min={0} max={3650} precision={0} /></Form.Item>
           </div>
-          <Form.Item name="monthly_budget_yuan" label="月度预算（人民币，0 为不限）" rules={[{ required: true }]}><InputNumber min={0} precision={2} prefix="¥" /></Form.Item>
+          <Form.Item name="monthly_budget_yuan" label={t("月度预算（人民币，0 为不限）")} rules={[{ required: true }]}><InputNumber min={0} precision={2} prefix="¥" /></Form.Item>
           <Form.Item name="id" label="Key ID" rules={[{ required: true }]}><Input /></Form.Item>
         </Form>
       </Drawer>
-      <Modal open={Boolean(issued)} title="API Key 已签发" footer={<Button type="primary" onClick={() => setIssued(undefined)}>我已保存</Button>} closable={false} maskClosable={false}>
-        <div className="secret-success"><span><Check size={26} /></span><div><strong>请立即复制并安全保存</strong><p>数据库和控制台只保存 SHA-256 摘要，关闭后无法再次查看明文。</p></div></div>
-        <div className="secret-box"><code>{issued?.secret}</code><Button icon={copied ? <Check size={16} /> : <Copy size={16} />} onClick={copySecret}>{copied ? "已复制" : "复制"}</Button></div>
+      <Modal open={Boolean(issued)} title={t("API Key 已签发")} footer={<Button type="primary" onClick={() => setIssued(undefined)}>{t("我已保存")}</Button>} closable={false} maskClosable={false}>
+        <div className="secret-success"><span><Check size={26} /></span><div><strong>{t("请立即复制并安全保存")}</strong><p>{t("数据库和控制台只保存 SHA-256 摘要，关闭后无法再次查看明文。")}</p></div></div>
+        <div className="secret-box"><code>{issued?.secret}</code><Button icon={copied ? <Check size={16} /> : <Copy size={16} />} onClick={copySecret}>{copied ? t("已复制") : t("复制")}</Button></div>
       </Modal>
     </>
   );

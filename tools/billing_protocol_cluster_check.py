@@ -7,10 +7,11 @@ import base64
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
-from observability_cluster import eventually, forward, kubectl, local_only
+from observability_cluster import eventually, forward, kubectl, local_only, request
 
 
 def main():
@@ -53,6 +54,28 @@ def main():
     kinds = kubectl("exec", "statefulset/postgres", "--", "psql", "-U", "xscope", "-d", "keycloak", "-At", "-c",
         f"SELECT kind FROM xscope.billing_events WHERE aggregate_id='{billing_id}' ORDER BY sequence").splitlines()
     assert kinds == ["reservation.created", "reservation.dispatched", "reservation.settled"], kinds
+    # Read-only discovery: do not ACK consumers or resolve unknown usage.
+    project = kubectl("exec", "statefulset/postgres", "--", "psql", "-U", "xscope", "-d", "keycloak", "-At", "-c",
+        f"SELECT project_id FROM xscope.billing_reservations WHERE id='{billing_id}'").strip()
+    assert project and all(c.isalnum() or c in "-_" for c in project)
+    with forward("control-plane", 8084) as base:
+        url = base + f"/internal/v1/billing/projects/{project}/pending-reservations"
+        try:
+            request(url)
+            raise AssertionError("pending discovery accepted missing internal token")
+        except urllib.error.HTTPError as error:
+            assert error.code == 401
+        pending = request(url + "?limit=1", headers={"Authorization": "Bearer " + token})
+        assert pending["requires_usage_evidence"] and len(pending["data"]) <= 1
+        assert all(row["state"] == "dispatched" and row["project_id"] == project for row in pending["data"])
+        assert all(row["id"] != billing_id for row in pending["data"])
+        identity = kubectl("exec", "statefulset/postgres", "--", "psql", "-U", "xscope", "-d", "keycloak", "-At", "-c",
+            f"SELECT api_key_id,to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-01') FROM xscope.usage_events WHERE request_id='{billing_id}'").strip().split("|")
+        check_url = base + f"/internal/v1/billing/projects/{project}/projections/check?" + urllib.parse.urlencode({"api_key_id": identity[0], "month": identity[1]})
+        checked = request(check_url, headers={"Authorization": "Bearer " + token})
+        assert checked["consistent_before"] and not checked["rebuilt"], "live projection/source mismatch"
+    print("PASS live balance/held/key/month projections match source history after inference, with no repair needed.")
+    print("PASS deployed authenticated bounded pending-reservation discovery; no automatic release or consumer mutation.")
     print("PASS deployed internal auth/validation; actual Pingora/EPP inference reserved -> dispatched -> settled; one balanced ledger and transactional events.")
     print("Added one settled development usage record: " + billing_id + "; no remaining hold from this request, no policies or consumers changed.")
 

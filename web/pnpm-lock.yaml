@@ -24,6 +24,12 @@ importers:
         specifier: 19.2.8
         version: 19.2.8(react@19.2.8)
     devDependencies:
+      '@playwright/test':
+        specifier: 1.63.0
+        version: 1.63.0
+      '@types/node':
+        specifier: 24.13.0
+        version: 24.13.0
       '@types/react':
         specifier: 19.2.7
         version: 19.2.7
@@ -32,13 +38,13 @@ importers:
         version: 19.2.3(@types/react@19.2.7)
       '@vitejs/plugin-react':
         specifier: 6.1.1
-        version: 6.1.1(vite@8.2.2)
+        version: 6.1.1(vite@8.2.2(@types/node@24.13.0))
       typescript:
         specifier: 5.9.2
         version: 5.9.2
       vite:
         specifier: 8.2.2
-        version: 8.2.2
+        version: 8.2.2(@types/node@24.13.0)
 
 packages:
 
@@ -92,6 +98,11 @@ packages:
 
   '@oxc-project/types@0.148.0':
     resolution: {integrity: sha512-Nm4s/jB+4FpFsPhWGEC4h7rzksesmtnMXomo6rCMcg/b8zLQuOziRgkCS1fxDCXOlJB/6Q8oABOZ/OP6RIPj9A==}
+
+  '@playwright/test@1.63.0':
+    resolution: {integrity: sha512-oxMK4vllB9RK5NQ2l1pq1IfOf2AvnEuj/vYGDj0H2nMtmtZpKtCwt/l00GEO6xjGfpBNAvjovvYdCm50dRQkpQ==}
+    engines: {node: '>=20'}
+    hasBin: true
 
   '@rc-component/async-validator@6.0.0':
     resolution: {integrity: sha512-D3AGQwdyE58gmvx6waVSXJ80JGO+IY5L2O8HDnSOex7JNlzB3GuN/4hyHNTdhy2qtOhkpbIjmeAN3tL993wKbA==}
@@ -477,6 +488,9 @@ packages:
     peerDependencies:
       react: ^18 || ^19
 
+  '@types/node@24.13.0':
+    resolution: {integrity: sha512-5vtOqGQr4NJKeEzV441FcOi2MeG9UTWq9LqVLGneDdu4vlX17H8kQ2PA2UmNwCUGPVDj4oBjNhS7ReVEIWJJrg==}
+
   '@types/react-dom@19.2.3':
     resolution: {integrity: sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ==}
     peerDependencies:
@@ -631,6 +645,16 @@ packages:
     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
     engines: {node: '>=12'}
 
+  playwright-core@1.63.0:
+    resolution: {integrity: sha512-rYCsBF/M5HjUch52bbtVONEFjv6Xu8sm8h72dNlR5bzIE1fvC/bxgspzkjSfU+MweEMmPM8KJebG6nnyxo5mCg==}
+    engines: {node: '>=20'}
+    hasBin: true
+
+  playwright@1.63.0:
+    resolution: {integrity: sha512-+7ziBLidS4NaNCdt57SUDT+wYmmd5fmiQejUic/kb+YsYSCPyOOE9sebzMjNmQrsnNpDJqd4WHvV/8lfKfUDUg==}
+    engines: {node: '>=20'}
+    hasBin: true
+
   postcss@8.5.28:
     resolution: {integrity: sha512-RRuzqDtt5Y9h3quz5hWhK+TPnsmVs6WwSU6LkJMeY4HstUEDuYTG8UJSdawMRzmzAtV+KEoG8N3Qg2qLy5vM/A==}
     engines: {node: ^10 || ^12 || >=14}
@@ -680,6 +704,9 @@ packages:
     resolution: {integrity: sha512-CWBzXQrc/qOkhidw1OzBTQuYRbfyxDXJMVJ1XNwUHGROVmuaeiEm3OslpZ1RV96d7SKKjZKrSJu3+t/xlw3R9A==}
     engines: {node: '>=14.17'}
     hasBin: true
+
+  undici-types@7.18.2:
+    resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
 
   vite@8.2.2:
     resolution: {integrity: sha512-cFKLV/PRgAUlIRm5WjMjJ86jrftzpqcgH+Us+DS8mI3CDNiH30Whrz8uHL3+MOLPAgqbMBAqWdAHAphOAM+z/Q==}
@@ -781,6 +808,10 @@ snapshots:
   '@emotion/unitless@0.7.5': {}
 
   '@oxc-project/types@0.148.0': {}
+
+  '@playwright/test@1.63.0':
+    dependencies:
+      playwright: 1.63.0
 
   '@rc-component/async-validator@6.0.0':
     dependencies:
@@ -1184,6 +1215,10 @@ snapshots:
       '@tanstack/query-core': 5.102.8
       react: 19.2.8
 
+  '@types/node@24.13.0':
+    dependencies:
+      undici-types: 7.18.2
+
   '@types/react-dom@19.2.3(@types/react@19.2.7)':
     dependencies:
       '@types/react': 19.2.7
@@ -1192,10 +1227,10 @@ snapshots:
     dependencies:
       csstype: 3.2.3
 
-  '@vitejs/plugin-react@6.1.1(vite@8.2.2)':
+  '@vitejs/plugin-react@6.1.1(vite@8.2.2(@types/node@24.13.0))':
     dependencies:
       '@rolldown/pluginutils': 1.0.1
-      vite: 8.2.2
+      vite: 8.2.2(@types/node@24.13.0)
 
   antd@6.6.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
     dependencies:
@@ -1336,6 +1371,12 @@ snapshots:
 
   picomatch@4.0.7: {}
 
+  playwright-core@1.63.0: {}
+
+  playwright@1.63.0:
+    dependencies:
+      playwright-core: 1.63.0
+
   postcss@8.5.28:
     dependencies:
       nanoid: 3.3.18
@@ -1393,7 +1434,9 @@ snapshots:
 
   typescript@5.9.2: {}
 
-  vite@8.2.2:
+  undici-types@7.18.2: {}
+
+  vite@8.2.2(@types/node@24.13.0):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
@@ -1401,4 +1444,5 @@ snapshots:
       rolldown: 1.2.7
       tinyglobby: 0.2.17
     optionalDependencies:
+      '@types/node': 24.13.0
       fsevents: 2.3.3

@@ -17,7 +17,10 @@ pub(crate) struct StreamMeter {
 impl Default for StreamMeter {
     fn default() -> Self {
         Self {
-            decoder: SseDecoder::with_limit(NonZeroUsize::new(MAX_EVENT_BYTES).unwrap()),
+            // MAX_EVENT_BYTES is a positive compile-time constant; MIN is a defensive fallback.
+            decoder: SseDecoder::with_limit(
+                NonZeroUsize::new(MAX_EVENT_BYTES).unwrap_or(NonZeroUsize::MIN),
+            ),
             usage: None,
             done: false,
             invalid: false,
@@ -75,6 +78,8 @@ impl StreamMeter {
 }
 
 #[cfg(test)]
+// Test fixture setup and response assertions deliberately panic at the failing boundary.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

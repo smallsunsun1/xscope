@@ -1,12 +1,14 @@
 mod api;
 mod billing;
 mod billing_feed;
+mod billing_projection;
 mod config;
 mod error;
 mod repository;
 
 use std::process::ExitCode;
 
+use anyhow::{Context, Result};
 use sea_orm::{ConnectOptions, Database};
 use sea_orm_migration::MigratorTrait;
 use serde::Deserialize;
@@ -27,8 +29,6 @@ struct BootstrapApiKey {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let _telemetry =
-        xscope_telemetry::init("xscope-control-plane").expect("telemetry initialization");
     if let Err(error) = run().await {
         tracing::error!(error = ?error, "control plane stopped");
         return ExitCode::FAILURE;
@@ -36,24 +36,39 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::from_env()?;
+async fn run() -> Result<()> {
+    let _telemetry = xscope_telemetry::init("xscope-control-plane")
+        .context("initialize control-plane telemetry")?;
+    let config = Config::from_env().context("load control-plane configuration")?;
     let mut options = ConnectOptions::new(config.database_url.clone());
     options
         .max_connections(4)
         .min_connections(0)
         .sqlx_logging(false);
-    let database = Database::connect(options).await?;
-    Migrator::up(&database, None).await?;
+    let database = Database::connect(options)
+        .await
+        .context("connect control-plane database")?;
+    Migrator::up(&database, None)
+        .await
+        .context("apply control-plane database migrations")?;
     let repository = Repository::new(database);
-    bootstrap(&repository, &config.bootstrap_api_keys_json).await?;
-    repository.backfill_billing_accounts().await?;
+    bootstrap(&repository, &config.bootstrap_api_keys_json)
+        .await
+        .context("bootstrap local API keys")?;
+    repository
+        .backfill_billing_accounts()
+        .await
+        .context("backfill billing accounts")?;
 
     let public_address = config.public_address;
     let internal_address = config.internal_address;
-    let state = AppState::new(repository, config);
-    let public_listener = tokio::net::TcpListener::bind(public_address).await?;
-    let internal_listener = tokio::net::TcpListener::bind(internal_address).await?;
+    let state = AppState::new(repository, config).context("create control-plane HTTP client")?;
+    let public_listener = tokio::net::TcpListener::bind(public_address)
+        .await
+        .with_context(|| format!("bind public control-plane listener on {public_address}"))?;
+    let internal_listener = tokio::net::TcpListener::bind(internal_address)
+        .await
+        .with_context(|| format!("bind internal control-plane listener on {internal_address}"))?;
     tracing::info!(address = %public_address, "control plane public API listening");
     tracing::info!(address = %internal_address, "control plane internal API listening");
     let internal_state = state.clone();
@@ -62,12 +77,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
     axum::serve(public_listener, public_router(&state))
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await
+        .context("serve public control-plane API")?;
     internal.abort();
     Ok(())
 }
 
-async fn bootstrap(repository: &Repository, raw: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn bootstrap(repository: &Repository, raw: &str) -> Result<()> {
     if raw.trim().is_empty() {
         return Ok(());
     }

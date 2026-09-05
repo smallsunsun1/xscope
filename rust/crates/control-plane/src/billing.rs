@@ -1,6 +1,6 @@
 //! Internal, account-serialized money protocol and transactional pull outbox.
 //! No timer releases ambiguous dispatched requests.
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::Utc;
 use sea_orm::sea_query::Alias;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter,
@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use xscope_domain::{MICROS_PER_MINOR_UNIT, Model, ceil_minor_units, usage_cost_microunits};
 use xscope_entities::{
-    api_key, billing_account, billing_event as event,
-    billing_reservation as reservation, ledger_entry, usage_event,
+    api_key, billing_account, billing_event as event, billing_reservation as reservation,
+    ledger_entry, usage_event,
 };
 
 use crate::{
@@ -21,8 +21,8 @@ use crate::{
 
 const HELD: [&str; 2] = ["reserved", "dispatched"];
 
-pub use xscope_domain::billing::{ReserveRequest, SettleRequest};
 pub use crate::billing_feed::{AckRequest, PollRequest};
+pub use xscope_domain::billing::{ReserveRequest, SettleRequest};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,7 +45,7 @@ pub(crate) fn identifier(value: &str) -> bool {
 fn json_value<T: Serialize>(value: &T) -> ServiceResult<Value> {
     serde_json::to_value(value).map_err(|e| ServiceError::Internal(e.to_string()))
 }
-async fn total<E: EntityTrait>(
+pub(crate) async fn total<E: EntityTrait>(
     query: Select<E>,
     column: E::Column,
     tx: &DatabaseTransaction,
@@ -75,7 +75,7 @@ pub(crate) async fn lock_account(
         .ok_or(ServiceError::NotFound)
 }
 
-pub(crate) async fn balance_and_held(
+pub(crate) async fn historical_balance_and_held(
     tx: &DatabaseTransaction,
     account_id: &str,
 ) -> ServiceResult<(i64, i64)> {
@@ -98,6 +98,14 @@ pub(crate) async fn balance_and_held(
     Ok((balance, held))
 }
 
+pub(crate) async fn balance_and_held(
+    tx: &DatabaseTransaction,
+    account_id: &str,
+) -> ServiceResult<(i64, i64)> {
+    let row = crate::billing_projection::account(tx, account_id).await?;
+    Ok((row.balance_microunits, row.held_microunits))
+}
+
 /// Caller must hold the account row lock. Sequences are account-local and are
 /// allocated while that lock is held until COMMIT (not a global DB sequence).
 pub(crate) async fn append_event(
@@ -108,12 +116,15 @@ pub(crate) async fn append_event(
     payload: Value,
 ) -> ServiceResult<()> {
     let prior = event::Entity::find()
+        .select_only()
+        .column(event::Column::Sequence)
         .filter(event::Column::BillingAccountId.eq(account_id))
         .order_by_desc(event::Column::Sequence)
+        .into_tuple::<i64>()
         .one(tx)
         .await?;
     let sequence = prior
-        .map_or(0, |e| e.sequence)
+        .unwrap_or(0)
         .checked_add(1)
         .ok_or_else(|| invalid("event sequence exhausted"))?;
     event::ActiveModel {
@@ -214,40 +225,29 @@ impl Repository {
             request.input_token_limit,
             request.output_token_limit,
         )?;
-        let (balance, held) = balance_and_held(&tx, &account.id).await?;
-        if account.enforce_balance
-            && balance
+        // Postpaid admission does not need a balance-history scan. Monthly
+        // key budgets below remain independently enforced when configured.
+        if account.enforce_balance {
+            let (balance, held) = balance_and_held(&tx, &account.id).await?;
+            if balance
                 .checked_sub(held)
                 .and_then(|v| v.checked_sub(amount))
                 .is_none_or(|v| v < 0)
-        {
-            return Err(ServiceError::InsufficientFunds(
-                "available balance cannot cover the reservation".into(),
-            ));
+            {
+                return Err(ServiceError::InsufficientFunds(
+                    "available balance cannot cover the reservation".into(),
+                ));
+            }
         }
         if key.monthly_budget_amount > 0 {
-            let month = Utc
-                .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
-                .single()
-                .unwrap()
-                .fixed_offset();
-            let spent = total(
-                usage_event::Entity::find()
-                    .filter(usage_event::Column::ApiKeyId.eq(&key.id))
-                    .filter(usage_event::Column::OccurredAt.gte(month)),
-                usage_event::Column::CostMicrounits,
-                &tx,
-            )
-            .await?;
+            let month = crate::billing_projection::month(now.date_naive());
+            let spent = crate::billing_projection::monthly(&tx, &key.id, month)
+                .await?
+                .spent_microunits;
             // Include unresolved older holds conservatively; no timer refunds them.
-            let key_held = total(
-                reservation::Entity::find()
-                    .filter(reservation::Column::ApiKeyId.eq(&key.id))
-                    .filter(reservation::Column::State.is_in(HELD)),
-                reservation::Column::ReservedMicrounits,
-                &tx,
-            )
-            .await?;
+            let key_held = crate::billing_projection::key_hold(&tx, &key.id)
+                .await?
+                .held_microunits;
             let budget = key
                 .monthly_budget_amount
                 .checked_mul(MICROS_PER_MINOR_UNIT)
@@ -262,6 +262,7 @@ impl Repository {
                 ));
             }
         }
+        crate::billing_projection::change_hold(&tx, &account.id, &key.id, amount).await?;
         let row = reservation::ActiveModel {
             id: Set(request.id),
             billing_account_id: Set(account.id.clone()),
@@ -360,6 +361,13 @@ impl Repository {
                 "dispatched/settled requests cannot be released; reconcile unknown usage",
             ));
         }
+        crate::billing_projection::change_hold(
+            &tx,
+            &account.id,
+            &row.api_key_id,
+            -row.reserved_microunits,
+        )
+        .await?;
         let mut active: reservation::ActiveModel = row.into();
         active.state = Set("released".into());
         active.completion = Set(Some(json!({"reason": request.reason})));
@@ -426,6 +434,19 @@ impl Repository {
         let amount = usage_cost_microunits(&price, request.input_tokens, request.output_tokens)?;
         let now = Utc::now().fixed_offset();
         let usage_id = format!("evt-reservation-{id}");
+        let monthly = crate::billing_projection::monthly(
+            &tx,
+            &row.api_key_id,
+            crate::billing_projection::month(now.date_naive()),
+        )
+        .await?;
+        crate::billing_projection::change_hold(
+            &tx,
+            &account.id,
+            &row.api_key_id,
+            -row.reserved_microunits,
+        )
+        .await?;
         usage_event::ActiveModel {
             event_id: Set(usage_id.clone()),
             request_id: Set(row.request_id.clone()),
@@ -450,6 +471,7 @@ impl Repository {
         }
         .insert(&tx)
         .await?;
+        crate::billing_projection::change_spend(&tx, monthly, amount).await?;
         let mut active: reservation::ActiveModel = row.into();
         active.state = Set("settled".into());
         active.settled_microunits = Set(Some(amount));
@@ -482,5 +504,4 @@ impl Repository {
         tx.commit().await?;
         Ok(row)
     }
-
 }

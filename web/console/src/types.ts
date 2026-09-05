@@ -118,6 +118,17 @@ export type BillingAccount = {
   updated_at: string;
 };
 
+export type BillingPosition = {
+  project_id: string; currency: string; balance_microunits: string;
+  held_microunits: string; available_microunits: string; updated_at: string;
+};
+export type PendingCursor = { created_before: string; after_created_at: string; after_id: string };
+export type PendingReservation = {
+  id: string; request_id: string; api_key_id: string; state: string;
+  reserved_microunits: string; created_at: string; updated_at: string;
+};
+export type PendingPage = { data: PendingReservation[]; next: PendingCursor | null; created_before: string; requires_usage_evidence: boolean };
+
 export type BillingOrder = {
   id: string;
   tenant_id: string;

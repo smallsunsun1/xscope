@@ -36,6 +36,18 @@ def eventually(check, timeout=25):
     raise AssertionError("gateway billing recovery timed out")
 
 
+def journal_text(path):
+    return "".join(p.read_text() for p in [path, *sorted(Path(str(path) + ".segments").glob("*.jsonl"))])
+
+
+def active_journal(path):
+    manifest = Path(str(path) + ".manifest")
+    if manifest.exists():
+        generation = json.loads(manifest.read_text())["active"]
+        return Path(str(path) + ".segments") / f"{generation:020}.jsonl"
+    return path
+
+
 class GatewayBillingTest(unittest.TestCase):
     def test_faults_and_crash_recovery(self):
         with tempfile.TemporaryDirectory(prefix="xscope-gateway-money-") as directory:
@@ -99,7 +111,7 @@ class GatewayBillingTest(unittest.TestCase):
                             identity = body["id"] if action == "reserve" else self.path.split("/")[-2]
                             attempts[(identity, action)] += 1
                             if action == "reserve":
-                                intents = Path(str(wal) + ".reservations.jsonl").read_text()
+                                intents = journal_text(Path(str(wal) + ".reservations.jsonl"))
                                 assert intents.endswith("\n")
                                 assert any(json.loads(line)["request"]["id"] == identity for line in intents.splitlines())
                                 if identity in rows:
@@ -148,27 +160,28 @@ class GatewayBillingTest(unittest.TestCase):
             env = dict(os.environ, XSCOPE_GATEWAY_ADDRESS=f"127.0.0.1:{gateway_port}", XSCOPE_METRICS_ADDRESS=f"127.0.0.1:{port()}",
                 XSCOPE_USAGE_WAL=str(wal), XSCOPE_REDIS_URL="", XSCOPE_CONTROL_INTERNAL_URL=f"http://127.0.0.1:{server.server_port}/internal/v1",
                 XSCOPE_INTERNAL_TOKEN="test-internal", XSCOPE_BILLING_RESERVATIONS="true", XSCOPE_MODEL_CONTEXT_TOKENS="128",
+                XSCOPE_WAL_SEGMENT_BYTES="1", XSCOPE_WAL_MAX_BYTES=str(192 << 20), XSCOPE_WAL_MIN_FREE_BYTES="4096",
                 XSCOPE_ADDITIONAL_SERVING_JSON="[]", XSCOPE_SERVING_ENTRY_JSON=json.dumps({"id": "test-pool", "model": "xscope-demo", "revision": "development", "address": f"127.0.0.1:{server.server_port}"}),
                 XSCOPE_API_KEYS_JSON=json.dumps([{"id": "key-test", "tenant_id": "test-tenant", "project_id": "test-project", "secret": "test-key"}]))
             process, logs = None, []
 
-            def healthy():
+            def healthy(path="/readyz", expected=200):
                 try:
                     c = http.client.HTTPConnection("127.0.0.1", gateway_port, timeout=1)
-                    c.request("GET", "/readyz")
+                    c.request("GET", path)
                     r = c.getresponse()
                     status = r.status
                     r.read()
                     c.close()
-                    return status == 200
+                    return status == expected
                 except OSError:
                     return False
 
-            def launch():
+            def launch(require_ready=True):
                 log = (root / f"gateway-{len(logs)}.log").open("wb")
                 logs.append(log)
                 p = subprocess.Popen([GATEWAY], env=env, stdout=log, stderr=log)
-                eventually(healthy)
+                eventually(lambda: healthy("/readyz" if require_ready else "/healthz"))
                 return p
 
             def infer(**overrides):
@@ -183,9 +196,10 @@ class GatewayBillingTest(unittest.TestCase):
                     c.close()
 
             def caught_up():
-                if len(wal.read_text().splitlines()) != state["runtime_calls"]:
+                if len(journal_text(wal).splitlines()) != state["runtime_calls"]:
                     return False  # logging runs after the client sees the last byte
                 for path in (wal, Path(str(wal) + ".reservations.jsonl")):
+                    path = active_journal(path)
                     checkpoint = Path(str(path) + ".checkpoint")
                     if path.stat().st_size and (not checkpoint.exists() or json.loads(checkpoint.read_text())["end"] != path.stat().st_size):
                         return False
@@ -268,11 +282,30 @@ class GatewayBillingTest(unittest.TestCase):
                 process.kill()
                 process.wait(timeout=5)
                 unblock.set()
-                process = launch()
+                # Admission must stop below the disk floor, but a pending
+                # settlement must still replay and checkpoint while unready.
+                env["XSCOPE_WAL_MIN_FREE_BYTES"] = str(2**63)
+                process = launch(require_ready=False)
+                eventually(lambda: healthy("/readyz", 503))
                 eventually(caught_up)
+                self.assertEqual(infer()[0], 503)
                 self.assertEqual(state["runtime_calls"], before)
                 self.assertEqual(len(settlements), 5)
                 self.assertGreaterEqual(attempts[(final[1], "settle")], 2)
+                for path in (wal, Path(str(wal) + ".reservations.jsonl")):
+                    self.assertGreater(json.loads(Path(str(path) + ".manifest").read_text())["active"], 0)
+                    self.assertTrue(Path(str(path) + ".seal").exists())
+                self.assertGreater(len(list(root.rglob("*.seal"))), 2)
+                # Unknown/over-limit records remain available even after ACK
+                # and sealing; delivery is not proof of financial settlement.
+                self.assertEqual(len(journal_text(wal).splitlines()), before)
+                process.kill()
+                process.wait(timeout=5)
+                attempts_before = dict(attempts)
+                env["XSCOPE_WAL_MIN_FREE_BYTES"] = "4096"
+                process = launch()
+                eventually(caught_up)
+                self.assertEqual(dict(attempts), attempts_before)
             except Exception:
                 for log in root.glob("*.log"):
                     print(log.read_text()[-8000:])

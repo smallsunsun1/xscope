@@ -20,5 +20,10 @@ mkdir -p /workspace/.build/images
 # succeeds; a failed second cquery inside process substitution used to be hidden
 # from set -e and could leave an old image archive to be loaded accidentally.
 for name in "$@"; do
-  cp "/bazel-cache/links/bazel-bin/deploy/images/${name}_load/tarball.tar" "/workspace/.build/images/${name}_load.tar"
+  # Bazel outputs may be read-only. Never overwrite a prior read-only inode
+  # through Docker Desktop's bind mount, or expose a partially copied archive.
+  image_archive_tmp="$(mktemp "/workspace/.build/images/.${name}_load.XXXXXX")"
+  cp "/bazel-cache/links/bazel-bin/deploy/images/${name}_load/tarball.tar" "${image_archive_tmp}"
+  chmod 0644 "${image_archive_tmp}"
+  mv -f "${image_archive_tmp}" "/workspace/.build/images/${name}_load.tar"
 done

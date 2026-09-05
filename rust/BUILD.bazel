@@ -7,12 +7,32 @@ exports_files([
 
 rustfmt_test(
     name = "format_test",
-    targets = ["//rust/crates/gateway", "//rust/crates/control-plane", "//rust/crates/cluster-agent", "//rust/crates/operator"],
+    targets = [
+        "//rust/crates/cluster-agent",
+        "//rust/crates/control-plane",
+        "//rust/crates/domain",
+        "//rust/crates/entities",
+        "//rust/crates/gateway",
+        "//rust/crates/kubernetes",
+        "//rust/crates/migration",
+        "//rust/crates/operator",
+        "//rust/crates/telemetry",
+    ],
     transitive = True,
 )
 
 rust_clippy_test(
     name = "clippy_test",
-    targets = ["//rust/crates/gateway", "//rust/crates/control-plane", "//rust/crates/cluster-agent", "//rust/crates/operator"],
+    targets = [
+        "//rust/crates/cluster-agent",
+        "//rust/crates/control-plane",
+        "//rust/crates/domain",
+        "//rust/crates/entities",
+        "//rust/crates/gateway",
+        "//rust/crates/kubernetes",
+        "//rust/crates/migration",
+        "//rust/crates/operator",
+        "//rust/crates/telemetry",
+    ],
     transitive = True,
 )

@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, Request, State},
@@ -39,32 +40,34 @@ impl From<kube::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self.0 {
-            Error::Invalid(message) => (400, "invalid_request", message),
-            Error::Conflict(message) => (409, "conflict", message),
+            Error::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", message),
+            Error::Conflict(message) => (StatusCode::CONFLICT, "conflict", message),
             Error::Kube(kube::Error::Api(ref e)) if e.code == 404 => (
-                404,
+                StatusCode::NOT_FOUND,
                 "not_found",
                 "model deployment not found or CRD not installed".into(),
             ),
             Error::Kube(kube::Error::Api(ref e)) if e.code == 409 => (
-                409,
+                StatusCode::CONFLICT,
                 "conflict",
                 "resource already exists or was concurrently modified".into(),
             ),
-            Error::Kube(kube::Error::Api(ref e)) if matches!(e.code, 400 | 422) => {
-                (400, "invalid_request", e.message.clone())
-            }
+            Error::Kube(kube::Error::Api(ref e)) if matches!(e.code, 400 | 422) => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                e.message.clone(),
+            ),
             error => {
                 tracing::warn!(%error,"Kubernetes request failed");
                 (
-                    503,
+                    StatusCode::SERVICE_UNAVAILABLE,
                     "cluster_unavailable",
                     "Kubernetes API is unavailable".into(),
                 )
             }
         };
         (
-            StatusCode::from_u16(status).unwrap(),
+            status,
             Json(json!({"error":{"code":code,"message":message}})),
         )
             .into_response()
@@ -184,7 +187,10 @@ async fn create(
     model.metadata.resource_version = None;
     model.metadata.owner_references = None;
     model.metadata.managed_fields = None;
-    let api: Api<ModelDeployment> = Api::namespaced(app.client, &model.namespace().unwrap());
+    let namespace = model
+        .namespace()
+        .ok_or_else(|| Error::Invalid("namespace missing after validation".into()))?;
+    let api: Api<ModelDeployment> = Api::namespaced(app.client, &namespace);
     Ok((
         StatusCode::CREATED,
         Json(api.create(&PostParams::default(), &model).await?),
@@ -267,25 +273,33 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 #[tokio::main(worker_threads = 2)]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _telemetry = xscope_telemetry::init("xscope-cluster-agent")?;
+async fn main() -> Result<()> {
+    let _telemetry = xscope_telemetry::init("xscope-cluster-agent")
+        .context("initialize cluster-agent telemetry")?;
     let app = App {
-        client: Client::try_default().await?,
+        client: Client::try_default()
+            .await
+            .context("create cluster-agent Kubernetes client")?,
         token: Arc::new(std::env::var("XSCOPE_INTERNAL_TOKEN").unwrap_or_default()),
     };
     let address =
         std::env::var("XSCOPE_CLUSTER_AGENT_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8083".into());
-    let listener = tokio::net::TcpListener::bind(&address).await?;
+    let listener = tokio::net::TcpListener::bind(&address)
+        .await
+        .with_context(|| format!("bind cluster-agent listener on {address}"))?;
     tracing::info!(%address,"cluster agent listening");
     axum::serve(listener, router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
-        .await?;
+        .await
+        .context("serve cluster-agent HTTP API")?;
     Ok(())
 }
 
 #[cfg(test)]
+// Test fixture setup and response assertions deliberately panic at the failing boundary.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use axum::{

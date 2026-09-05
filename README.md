@@ -32,6 +32,8 @@ XScope 是一个面向大模型 API 的云原生服务平台。源码按语言�
 ```bash
 # 整个 monorepo
 bazel build //...
+# 首次运行完整测试前，先安装 Playwright 对应的 Chromium
+bazel run //web/console:install_browsers
 bazel test //...
 
 # 局部测试也使用 Bazel
@@ -50,6 +52,8 @@ bazel run -- @pnpm//:pnpm --dir "$PWD/web" install --lockfile-only
 ```
 
 ### 管理控制台
+
+右上角支持简体中文 / English 切换，并记住语言偏好。运行 `bazel test //web/console:checks` 可执行类型、金额格式及 Playwright 浏览器回归检查；测试范围与 CI 配置见 [前端质量检查](docs/frontend-quality.md)。
 
 控制台包含平台总览、项目、API Key 的 RPM/TPM/模型/预算策略、模型价格、用量、余额门禁、充值订单、支付退款、双分录账本、发票、对账，以及 Kubernetes `ModelDeployment` 管理。控制面未连接成员集群或 CRD 未安装时，部署页会进入只读保护态，其余管理功能仍可使用。
 

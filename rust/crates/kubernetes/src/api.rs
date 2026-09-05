@@ -260,6 +260,8 @@ pub fn validate(model: &mut ModelDeployment) -> Result<(), Error> {
 }
 
 #[cfg(test)]
+// This compile-time JSON fixture is kept in lockstep with ModelDeploymentSpec.
+#[allow(clippy::unwrap_used)]
 pub(crate) fn example() -> ModelDeployment {
     let mut model = ModelDeployment::new("demo", serde_json::from_value(serde_json::json!({
         "model":{"id":"demo","revision":"v1","uri":"s3://models/demo","checksum":format!("sha256:{}", "a".repeat(64))},
@@ -271,6 +273,8 @@ pub(crate) fn example() -> ModelDeployment {
     model
 }
 #[cfg(test)]
+// Test fixture setup and response assertions deliberately panic at the failing boundary.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     #[test]

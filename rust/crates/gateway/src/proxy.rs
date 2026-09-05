@@ -53,6 +53,7 @@ pub struct RequestContext {
     meterable: bool,
     quota_reservation: Option<QuotaReservation>,
     billing_ticket: Option<Ticket>,
+    storage_permit: Option<Arc<crate::storage::StoragePermit>>,
     usage_emitted: bool,
     telemetry: Option<xscope_telemetry::RequestTrace>,
 }
@@ -78,6 +79,7 @@ impl Default for RequestContext {
             meterable: false,
             quota_reservation: None,
             billing_ticket: None,
+            storage_permit: None,
             usage_emitted: false,
             telemetry: None,
         }
@@ -225,6 +227,13 @@ impl ProxyHttp for Gateway {
             }), &ctx.request_id).await?;
             return Ok(true);
         }
+        match self.usage.reserve_space() {
+            Ok(permit) => ctx.storage_permit = Some(permit),
+            Err(_) => {
+                respond_json(session, 503, serde_json::json!({"error":{"code":"usage_storage_capacity","message":"WAL capacity unavailable"}}), &ctx.request_id).await?;
+                return Ok(true);
+            }
+        }
         // This gateway currently exposes one public model. Select its version
         // before Pingora connects upstream; body admission below still verifies
         // the submitted model and holds all prompt bytes until authorization.
@@ -301,8 +310,19 @@ impl ProxyHttp for Gateway {
                 // in the financial contract. Never trust a tokenizer estimate
                 // as the monetary input ceiling: reserve the remaining context.
                 let mut value: serde_json::Value = serde_json::from_slice(&ctx.request_body)
-                    .expect("already decoded ModelRequest");
-                let object = value.as_object_mut().expect("ModelRequest object");
+                    .map_err(|error| {
+                        Error::because(
+                            ErrorType::InternalError,
+                            "cannot decode validated inference request",
+                            error,
+                        )
+                    })?;
+                let object = value.as_object_mut().ok_or_else(|| {
+                    Error::explain(
+                        ErrorType::InternalError,
+                        "validated inference request is not an object",
+                    )
+                })?;
                 object.remove("max_tokens");
                 object.remove("max_completion_tokens");
                 let name = if request.max_completion_tokens.is_some() {
@@ -311,7 +331,13 @@ impl ProxyHttp for Gateway {
                     "max_tokens"
                 };
                 object.insert(name.into(), limits.1.into());
-                ctx.request_body = serde_json::to_vec(&value).expect("JSON value");
+                ctx.request_body = serde_json::to_vec(&value).map_err(|error| {
+                    Error::because(
+                        ErrorType::InternalError,
+                        "cannot encode bounded inference request",
+                        error,
+                    )
+                })?;
                 Some(limits)
             } else {
                 None
@@ -323,7 +349,12 @@ impl ProxyHttp for Gateway {
                     })?;
                 let options = value
                     .as_object_mut()
-                    .expect("ModelRequest requires an object")
+                    .ok_or_else(|| {
+                        Error::explain(
+                            ErrorType::InternalError,
+                            "validated inference request is not an object",
+                        )
+                    })?
                     .entry("stream_options")
                     .or_insert_with(|| serde_json::json!({}));
                 if options.is_null() {
@@ -393,7 +424,19 @@ impl ProxyHttp for Gateway {
                 };
                 ctx.billing_ticket = Some(
                     billing
-                        .admit(reservation, trace_headers)
+                        .admit(
+                            reservation,
+                            trace_headers,
+                            ctx.storage_permit
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    Error::explain(
+                                        ErrorType::InternalError,
+                                        "billing admission has no storage permit",
+                                    )
+                                })?
+                                .clone(),
+                        )
                         .await
                         .map_err(|status| {
                             let public_status = if matches!(status, 400 | 402 | 403 | 422) {
@@ -674,7 +717,13 @@ fn money_token_limits(request: &ModelRequest, context: i64) -> Result<(i64, i64)
             "ambiguous or excessive model token bounds",
         ));
     }
-    let output = i64::try_from(output).expect("bounded by positive i64 context");
+    let output = i64::try_from(output).map_err(|error| {
+        Error::because(
+            ErrorType::HTTPStatus(400),
+            "completion token bound is too large",
+            error,
+        )
+    })?;
     Ok((context - output, output))
 }
 
@@ -758,7 +807,42 @@ impl RequestContext {
     }
 }
 
+fn request_id(session: &Session) -> String {
+    session
+        .req_header()
+        .headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .map_or_else(|| format!("req-{}", uuid::Uuid::now_v7()), str::to_owned)
+}
+
+async fn respond_json(
+    session: &mut Session,
+    status: u16,
+    value: serde_json::Value,
+    request_id: &str,
+) -> Result<()> {
+    let body = Bytes::from(serde_json::to_vec(&value).map_err(|error| {
+        Error::because(
+            ErrorType::InternalError,
+            "could not encode JSON response",
+            error,
+        )
+    })?);
+    let mut header = ResponseHeader::build(status, Some(4))?;
+    header.insert_header("content-type", "application/json")?;
+    header.insert_header("content-length", body.len().to_string())?;
+    header.insert_header("x-request-id", request_id)?;
+    session
+        .write_response_header(Box::new(header), false)
+        .await?;
+    session.write_response_body(Some(body), true).await
+}
+
 #[cfg(test)]
+// Test fixture setup and response assertions deliberately panic at the failing boundary.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::{RequestContext, header_matches, strip_serving_control_headers};
     use pingora_http::RequestHeader;
@@ -815,37 +899,4 @@ mod tests {
         ctx.stream_meter.observe(b"data: [DONE]\n\n").unwrap();
         assert_eq!(ctx.outcome(None), "usage_pending");
     }
-}
-
-fn request_id(session: &Session) -> String {
-    session
-        .req_header()
-        .headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty() && value.len() <= 128)
-        .map_or_else(|| format!("req-{}", uuid::Uuid::now_v7()), str::to_owned)
-}
-
-async fn respond_json(
-    session: &mut Session,
-    status: u16,
-    value: serde_json::Value,
-    request_id: &str,
-) -> Result<()> {
-    let body = Bytes::from(serde_json::to_vec(&value).map_err(|error| {
-        Error::because(
-            ErrorType::InternalError,
-            "could not encode JSON response",
-            error,
-        )
-    })?);
-    let mut header = ResponseHeader::build(status, Some(4))?;
-    header.insert_header("content-type", "application/json")?;
-    header.insert_header("content-length", body.len().to_string())?;
-    header.insert_header("x-request-id", request_id)?;
-    session
-        .write_response_header(Box::new(header), false)
-        .await?;
-    session.write_response_body(Some(body), true).await
 }

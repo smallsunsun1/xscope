@@ -19,6 +19,7 @@ data:
   XSCOPE_POLICY_REFRESH_SECONDS: "5"
   XSCOPE_REDIS_URL: "redis://redis:6379/"
   RUST_LOG: "xscope_gateway=info,xscope_control_plane=info,xscope_kubernetes=info,xscope_cluster_agent=info,xscope_operator=info,xscope_telemetry=info,opentelemetry=warn,kube=warn,tower_http=info,sea_orm=warn,pingora=warn"
+  RUST_LIB_BACKTRACE: "1"
   XSCOPE_METRICS_ADDRESS: "0.0.0.0:9090"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
   OTEL_TRACES_SAMPLER: "parentbased_traceidratio"
@@ -29,6 +30,10 @@ data:
   XSCOPE_LOG_FORMAT: "json"
   XSCOPE_SERVING_ENTRY_JSON: '{"id":"demo-pool","model":"xscope-demo","address":"inference-serving:8085"}'
   XSCOPE_USAGE_WAL: "/var/lib/xscope/usage-wal/events.jsonl"
+  # Combined intent + usage data, including retained sealed segments (256 MiB PVC).
+  XSCOPE_WAL_SEGMENT_BYTES: "16777216"
+  XSCOPE_WAL_MAX_BYTES: "201326592"
+  XSCOPE_WAL_MIN_FREE_BYTES: "33554432"
   XSCOPE_REGION: "local"
   XSCOPE_MODEL_REVISION: "development"
   XSCOPE_PRICE_VERSION: "2026-09-01"

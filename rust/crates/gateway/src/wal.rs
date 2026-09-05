@@ -51,6 +51,12 @@ fn sync_parent(path: &Path) -> io::Result<()> {
 }
 
 impl Journal {
+    pub fn drained(&self) -> bool {
+        self.offset == self.end
+    }
+    pub fn len(&self) -> u64 {
+        self.end
+    }
     pub fn open(path: &Path) -> io::Result<Self> {
         let mut file = OpenOptions::new()
             .read(true)
@@ -179,6 +185,8 @@ impl Journal {
 }
 
 #[cfg(test)]
+// Test fixture setup and response assertions deliberately panic at the failing boundary.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     struct Fixture(PathBuf);

@@ -1,3 +1,4 @@
+use anyhow::{Context as _, Result};
 use axum::{Router, routing::get};
 use futures::StreamExt;
 use k8s_openapi::api::{apps::v1::Deployment, core::v1::Service};
@@ -19,9 +20,12 @@ fn env(name: &str, fallback: &str) -> String {
 }
 
 #[tokio::main(worker_threads = 2)]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _telemetry = xscope_telemetry::init("xscope-operator")?;
-    let client = Client::try_default().await?;
+async fn main() -> Result<()> {
+    let _telemetry =
+        xscope_telemetry::init("xscope-operator").context("initialize operator telemetry")?;
+    let client = Client::try_default()
+        .await
+        .context("create operator Kubernetes client")?;
     let lock = LeaseLock::new(
         client.clone(),
         &env("XSCOPE_OPERATOR_NAMESPACE", "xscope-system"),
@@ -40,8 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "http://prometheus.xscope-system.svc:9090",
         ),
     });
-    let listener =
-        tokio::net::TcpListener::bind(env("XSCOPE_OPERATOR_ADDRESS", "0.0.0.0:8082")).await?;
+    let address = env("XSCOPE_OPERATOR_ADDRESS", "0.0.0.0:8082");
+    let listener = tokio::net::TcpListener::bind(&address)
+        .await
+        .with_context(|| format!("bind operator health listener on {address}"))?;
     let health = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -56,10 +62,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let shutdown = async {
         #[cfg(unix)]
         {
-            let mut terminate =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("SIGTERM handler");
-            tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut terminate) => {
+                    tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "SIGTERM handler unavailable; waiting for Ctrl-C");
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }
         }
         #[cfg(not(unix))]
         {

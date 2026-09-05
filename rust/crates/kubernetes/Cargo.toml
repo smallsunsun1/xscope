@@ -19,3 +19,6 @@ xscope-telemetry = { path = "../telemetry" }
 tower = { workspace = true, features = ["util"] }
 http.workspace = true
 axum.workspace = true
+
+[lints]
+workspace = true

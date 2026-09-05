@@ -28,9 +28,14 @@ fi
 # Preserve existing Grafana login/encryption keys across redeployments.
 kubectl create namespace xscope-system --dry-run=client -o yaml | kubectl apply -f -
 bazel run //tools:observability_admin
+# Exclude old financial writers before starting projection-aware control planes.
+# This is a short fail-closed maintenance gap, NOT a financial data reset.
+if [[ "${1:-}" != "--reset-business-data" ]] && kubectl -n xscope-system get deployment/control-plane >/dev/null 2>&1; then
+  bazel run //tools:deploy_billing_protocol -- --quiesce-only
+fi
 kubectl apply -k "${repository_root}/deploy/k8s/overlays/local"
 if [[ "${1:-}" != "--reset-business-data" ]]; then
-  kubectl -n xscope-system rollout restart deployment/control-plane deployment/gateway
+  kubectl -n xscope-system rollout restart deployment/gateway
 fi
 kubectl -n xscope-system rollout restart deployment/cluster-agent deployment/runtime deployment/operator
 kubectl -n xscope-system rollout status statefulset/postgres --timeout=180s

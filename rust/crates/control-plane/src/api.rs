@@ -69,19 +69,17 @@ impl UserContext {
 }
 
 impl AppState {
-    #[must_use]
-    pub fn new(repository: Repository, config: Config) -> Self {
+    pub fn new(repository: Repository, config: Config) -> Result<Self, reqwest::Error> {
         let component_targets = config.component_targets.iter().cloned().collect();
-        Self {
+        Ok(Self {
             repository,
             config: Arc::new(config),
             http: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(3))
                 .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .expect("static HTTP client configuration must be valid"),
+                .build()?,
             component_targets: Arc::new(component_targets),
-        }
+        })
     }
 }
 
@@ -105,6 +103,14 @@ pub fn public_router(state: &AppState) -> Router {
         .route("/api-keys/{id}", delete(revoke_api_key))
         .route("/quote", get(quote))
         .route("/billing/summary", get(billing_summary))
+        .route(
+            "/billing/accounts/{project_id}/position",
+            get(console_billing_position),
+        )
+        .route(
+            "/billing/accounts/{project_id}/pending-reservations",
+            get(console_pending_reservations),
+        )
         .route(
             "/billing/accounts/{project_id}",
             get(get_billing_account).put(update_balance_policy),
@@ -158,6 +164,18 @@ pub fn internal_router(state: AppState) -> Router {
         .route("/internal/v1/usage-events", post(record_usage))
         .route("/internal/v1/billing/reservations", post(reserve_money))
         .route(
+            "/internal/v1/billing/projects/{project}/projections/check",
+            get(projection_check),
+        )
+        .route(
+            "/internal/v1/billing/projects/{project}/projections/rebuild",
+            post(projection_rebuild),
+        )
+        .route(
+            "/internal/v1/billing/projects/{project}/pending-reservations",
+            get(pending_reservations),
+        )
+        .route(
             "/internal/v1/billing/projects/{project}/reservations/{id}",
             get(money_reservation),
         )
@@ -184,6 +202,32 @@ pub fn internal_router(state: AppState) -> Router {
         .route_layer(middleware::from_fn_with_state(state.clone(), internal_auth))
         .with_state(state)
         .layer(middleware::from_fn(observe_http))
+}
+
+async fn projection_check(
+    State(state): State<AppState>,
+    Path(project): Path<String>,
+    Query(request): Query<crate::billing_projection::CheckRequest>,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        state
+            .repository
+            .projection_check(&project, request, false)
+            .await?,
+    ))
+}
+
+async fn projection_rebuild(
+    State(state): State<AppState>,
+    Path(project): Path<String>,
+    Json(request): Json<crate::billing_projection::CheckRequest>,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        state
+            .repository
+            .projection_check(&project, request, true)
+            .await?,
+    ))
 }
 
 async fn reserve_money(
@@ -239,6 +283,19 @@ async fn poll_billing_events(
         state
             .repository
             .poll_billing_events(&project, &consumer, request)
+            .await?,
+    ))
+}
+
+async fn pending_reservations(
+    State(state): State<AppState>,
+    Path(project): Path<String>,
+    Query(request): Query<crate::billing_feed::PendingRequest>,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        state
+            .repository
+            .pending_reservations(&project, request)
             .await?,
     ))
 }
@@ -490,12 +547,16 @@ async fn billing_summary(
         authorize_project(&state.repository, &context, project_id).await?;
     }
     let now = Utc::now();
-    let start = query.from.unwrap_or_else(|| {
+    let start = if let Some(start) = query.from {
+        start
+    } else {
         Utc.with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
             .single()
-            .expect("valid current month")
-    });
-    let end = query.to.unwrap_or_else(|| {
+            .ok_or_else(|| ServiceError::Internal("could not construct current month".into()))?
+    };
+    let end = if let Some(end) = query.to {
+        end
+    } else {
         let (year, month) = if start.month() == 12 {
             (start.year() + 1, 1)
         } else {
@@ -503,8 +564,8 @@ async fn billing_summary(
         };
         Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0)
             .single()
-            .expect("valid next month")
-    });
+            .ok_or_else(|| ServiceError::Internal("could not construct next month".into()))?
+    };
     let mut summary = state
         .repository
         .billing_summary(query.project_id.as_deref(), start, end)
@@ -534,6 +595,41 @@ async fn get_billing_account(
 ) -> ServiceResult<Json<xscope_domain::BillingAccount>> {
     authorize_project(&state.repository, &context, &project_id).await?;
     Ok(Json(state.repository.billing_account(&project_id).await?))
+}
+
+async fn console_billing_position(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(project_id): Path<String>,
+) -> ServiceResult<Json<Value>> {
+    authorize_project(&state.repository, &context, &project_id).await?;
+    Ok(Json(state.repository.billing_position(&project_id).await?))
+}
+
+async fn console_pending_reservations(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(project_id): Path<String>,
+    Query(request): Query<crate::billing_feed::PendingRequest>,
+) -> ServiceResult<Json<Value>> {
+    authorize_project_owner(&state.repository, &context, &project_id).await?;
+    let page = state
+        .repository
+        .pending_reservations(&project_id, request)
+        .await?;
+    // Explicit public DTO: never expose internal spec, frozen prices or
+    // completion payloads wholesale through the console endpoint.
+    let rows = page["data"]
+        .as_array()
+        .ok_or_else(|| ServiceError::Internal("invalid pending page".into()))?;
+    let data: Vec<Value> = rows.iter().map(|row| json!({
+        "id": row["id"], "request_id": row["request_id"], "api_key_id": row["api_key_id"],
+        "state": row["state"], "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "reserved_microunits": row["reserved_microunits"].as_i64().map(|v| v.to_string()),
+    })).collect();
+    Ok(Json(
+        json!({"data": data, "next": page["next"], "created_before": page["created_before"], "requires_usage_evidence": true}),
+    ))
 }
 
 async fn update_balance_policy(

@@ -20,6 +20,8 @@ import urllib.request
 import uuid
 
 from python.runfiles import runfiles
+from billing_cursor_checks import verify as verify_cursors
+from billing_projection_checks import verify as verify_projections, snapshot as projection_snapshot
 
 
 def port():
@@ -53,7 +55,9 @@ def main():
             container = subprocess.check_output(["docker", "run", "--rm", "-d", "--name", "xscope-money-smoke-" + uuid.uuid4().hex[:10],
                 "--cpus", "0.5", "--memory", "192m", "-p", "127.0.0.1::5432", "-e", "POSTGRES_PASSWORD=" + token, image], text=True).strip()
             pg_port = int(subprocess.check_output(["docker", "port", container, "5432/tcp"], text=True).strip().rsplit(":", 1)[1])
-            eventually(lambda: subprocess.run(["docker", "exec", container, "pg_isready", "-U", "postgres"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
+            # Image initialization briefly exposes a temporary Unix-socket-only
+            # server. Wait for the final TCP listener used by the application.
+            eventually(lambda: subprocess.run(["docker", "exec", container, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
 
             def sql(statement):
                 return subprocess.check_output(["docker", "exec", container, "psql", "-U", "postgres", "-At", "-v", "ON_ERROR_STOP=1", "-c", statement], text=True).strip()
@@ -165,7 +169,9 @@ def main():
             # Inject a database failure after the ledger writes but before COMMIT.
             # SQL is test-fixture fault injection only; application writes use SeaORM.
             sql("CREATE FUNCTION fail_test_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.kind = 'reservation.settled' THEN RAISE EXCEPTION 'injected outbox failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER test_fail BEFORE INSERT ON xscope.billing_events FOR EACH ROW EXECUTE FUNCTION fail_test_event()")
+            projections_before = projection_snapshot(sql)
             assert api("POST", path("settle") + "/settle", settlement)[0] == 503
+            assert projection_snapshot(sql) == projections_before
             assert api("GET", path("settle"))[1]["state"] == "dispatched"
             assert sql("SELECT count(*) FROM xscope.usage_events WHERE event_id='evt-reservation-settle'") == "0"
             assert sql("SELECT count(*) FROM xscope.ledger_transactions WHERE idempotency_key='reservation:settle'") == "0"
@@ -282,6 +288,46 @@ def main():
             assert len(runtime_calls) == 2
             assert sql("SELECT count(DISTINCT t.id),count(e.id),sum(e.amount_microunits) FROM xscope.ledger_transactions t JOIN xscope.ledger_entries e ON e.transaction_id=t.id WHERE t.idempotency_key IN ('reservation:" + first_id + "','reservation:" + second[1] + "')") == "2|4|0"
             print("PASS two actual Gateways / two control planes: 8 concurrent requests -> 1 Runtime call + 7 HTTP 402; repeated client ID creates distinct balanced settlements", flush=True)
+            verify_cursors(api, sql, container, setup, request)
+            verify_projections(api, sql, container, setup, request)
+            setup("console-pending")
+            assert api("POST", "/billing/reservations", request("console-evidence", project="console-pending"))[0] == 200
+            assert api("POST", "/billing/projects/console-pending/reservations/console-evidence/dispatch", {})[0] == 200
+            sql("UPDATE xscope.billing_reservations SET created_at=now()-interval '1 hour' WHERE id='console-evidence'")
+            # Console routes use the public session boundary, never the
+            # Gateway internal token. Start an isolated trusted-header reader.
+            public, private = port(), port()
+            console_env = dict(configs[0][2], XSCOPE_CONTROL_ADDRESS=f"127.0.0.1:{public}",
+                XSCOPE_CONTROL_INTERNAL_ADDRESS=f"127.0.0.1:{private}", XSCOPE_METRICS_ADDRESS=f"127.0.0.1:{port()}",
+                XSCOPE_CONSOLE_AUTH="trusted-headers", XSCOPE_AUTO_JOIN_DEFAULT_TENANT="false", XSCOPE_BOOTSTRAP_ADMIN_USERS="console-smoke-owner")
+            configs.append((public, private, console_env))
+            launch(len(configs) - 1)
+            def console_get(path, user=None):
+                headers = {} if user is None else {"X-Auth-Request-User": user, "X-Auth-Request-Preferred-Username": user, "X-Auth-Request-Sub": user}
+                req = urllib.request.Request(f"http://127.0.0.1:{public}/admin/v1" + path, headers=headers)
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        return response.status, json.load(response)
+                except urllib.error.HTTPError as error:
+                    return error.code, json.load(error)
+            position_path = "/billing/accounts/funded/position"
+            pending_path = "/billing/accounts/console-pending/pending-reservations"
+            for endpoint in (position_path, pending_path):
+                assert console_get(endpoint)[0] == 401
+                assert console_get(endpoint, "console-smoke-outsider")[0] == 403
+            status, user = console_get("/session", "console-smoke-member")
+            assert status == 200
+            sql("INSERT INTO xscope.tenant_memberships (id,user_id,tenant_id,role,created_at) VALUES ('console-read-member','" + user["id"] + "','test-tenant','member',now())")
+            assert console_get(position_path, "console-smoke-member")[0] == 200
+            assert console_get(pending_path, "console-smoke-member")[0] == 403
+            status, position = console_get(position_path, "console-smoke-owner")
+            assert status == 200 and isinstance(position["held_microunits"], str)
+            assert int(position["available_microunits"]) == int(position["balance_microunits"]) - int(position["held_microunits"])
+            status, pending = console_get(pending_path + "?limit=1", "console-smoke-owner")
+            assert status == 200 and len(pending["data"]) == 1 and pending["data"][0]["id"] == "console-evidence"
+            assert all("spec" not in row and "price" not in row and "completion" not in row and isinstance(row["reserved_microunits"], str) for row in pending["data"])
+            assert console_get(pending_path + "?limit=101", "console-smoke-owner")[0] == 400
+            print("PASS console positions and bounded pending discovery: anonymous/outsider denied, member financial read, owner-only evidence list, exact string money and redacted DTO", flush=True)
             success = True
         finally:
             release_runtime.set()

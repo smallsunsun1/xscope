@@ -2,6 +2,13 @@ common --enable_bzlmod
 common --announce_rc
 build --show_timestamps
 build --keep_going
+# Rust quality gates run on every Bazel build/test. Local #[allow] attributes
+# are reserved for documented invariants and deliberate test assertions.
+build --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect,@rules_rust//rust:defs.bzl%rustfmt_aspect
+build --output_groups=+clippy_checks,+rustfmt_checks
+build --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+build --@rules_rust//rust/settings:clippy_flag=-Dclippy::unwrap_used
+build --@rules_rust//rust/settings:clippy_flag=-Dclippy::expect_used
 test --test_output=errors
 
 build:ci --color=no

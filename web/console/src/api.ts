@@ -1,8 +1,12 @@
+import { t } from "./i18n";
 import type {
   APIErrorBody,
   APIKey,
   APIKeyRequest,
   BillingAccount,
+  BillingPosition,
+  PendingPage,
+  PendingCursor,
   BillingOrder,
   BillingSummary,
   CreateOrderRequest,
@@ -57,7 +61,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       // Preserve the HTTP fallback when an intermediary returns non-JSON.
     }
     throw new APIError(
-      body.error?.message ?? `请求失败（HTTP ${response.status}）`,
+      body.error?.message ?? t("请求失败（HTTP {value0}）", { value0: response.status }),
       response.status,
       body.error?.code ?? "http_error",
     );
@@ -118,6 +122,12 @@ export const api = {
   },
   billingAccount: (projectID: string) =>
     request<BillingAccount>(`/admin/v1/billing/accounts/${encodeURIComponent(projectID)}`),
+  billingPosition: (projectID: string) =>
+    request<BillingPosition>(`/admin/v1/billing/accounts/${encodeURIComponent(projectID)}/position`),
+  pendingReservations: (projectID: string, cutoff: string, cursor?: PendingCursor) => {
+    const params = new URLSearchParams({ limit: "20", created_before: cutoff, ...cursor });
+    return request<PendingPage>(`/admin/v1/billing/accounts/${encodeURIComponent(projectID)}/pending-reservations?${params}`);
+  },
   updateBalancePolicy: (projectID: string, enforceBalance: boolean) =>
     request<BillingAccount>(`/admin/v1/billing/accounts/${encodeURIComponent(projectID)}`, {
       method: "PUT",
@@ -193,5 +203,13 @@ export const componentHealth = (component: string) =>
   request<Health>(`/admin/v1/components/${encodeURIComponent(component)}/health`);
 
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "发生未知错误";
+  if (error instanceof APIError) {
+    if (error.status === 401) return t("请求未获授权，请重新登录");
+    if (error.status === 403) return t("没有执行此操作的权限");
+    if (error.status === 409) return t("资源已被修改，请刷新后重试");
+    if (error.status >= 500) return t("服务暂不可用，请稍后重试");
+    if (error.code === "http_error") return t("请求失败（HTTP {value0}）", { value0: error.status });
+  }
+  if (error instanceof TypeError && /fetch|network/i.test(error.message)) return t("无法连接服务，请检查网络");
+  return error instanceof Error ? error.message : t("发生未知错误");
 }

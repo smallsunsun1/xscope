@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::Principal;
 use crate::billing::Ticket;
-use crate::wal::Journal;
+use crate::segments::Journal;
+use crate::storage::{StorageBudget, StoragePermit};
 
 pub struct UsageSink {
+    storage: Arc<StorageBudget>,
     writer: Arc<Mutex<Journal>>,
     reporter: Option<SyncSender<()>>,
     healthy: Arc<AtomicBool>,
@@ -89,8 +91,9 @@ impl UsageSink {
         price_version: String,
         report_url: String,
         internal_token: String,
+        storage: Arc<StorageBudget>,
     ) -> io::Result<Self> {
-        let writer = Arc::new(Mutex::new(Journal::open(path.as_ref())?));
+        let writer = Arc::new(Mutex::new(Journal::open(path.as_ref(), storage.clone())?));
         let healthy = Arc::new(AtomicBool::new(true));
         let reporter = if report_url.is_empty() || internal_token.is_empty() {
             None
@@ -103,6 +106,7 @@ impl UsageSink {
             ))
         };
         Ok(Self {
+            storage,
             writer,
             reporter,
             healthy,
@@ -114,7 +118,11 @@ impl UsageSink {
 
     #[must_use]
     pub fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire)
+        self.healthy.load(Ordering::Acquire) && self.storage.is_ready()
+    }
+
+    pub(crate) fn reserve_space(&self) -> io::Result<Arc<StoragePermit>> {
+        self.storage.reserve()
     }
 
     /// Durably appends one immutable usage event before asynchronously reporting it.

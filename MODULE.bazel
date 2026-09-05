@@ -113,6 +113,12 @@ crate.annotation(
     crate_features = ["offline"],
 )
 crate.annotation(
+    crate = "k8s-openapi",
+    # Keep generated rust-project.json in sync with the feature selected by
+    # k8s-openapi's build script so rust-analyzer can expand CustomResource.
+    rustc_flags = ['--cfg=k8s_openapi_enabled_version="1.34"'],
+)
+crate.annotation(
     crate = "smallvec",
     crate_features = ["serde"],
     deps = ["@crates__serde-1.0.229//:serde"],

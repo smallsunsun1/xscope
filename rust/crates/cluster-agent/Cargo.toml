@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 [dependencies]
+anyhow.workspace = true
 axum.workspace = true
 kube.workspace = true
 serde.workspace = true
@@ -17,3 +18,6 @@ xscope-kubernetes = { path = "../kubernetes" }
 xscope-telemetry = { path = "../telemetry" }
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

@@ -148,7 +148,8 @@ impl QuotaManager {
                                 .map_err(|e| QuotaError::Redis(e.to_string()))?;
                             connection = Some(connected);
                         }
-                        execute(connection.as_mut().unwrap(), &command)
+                        let connection = connection.as_mut().ok_or(QuotaError::Unavailable)?;
+                        execute(connection, &command)
                     })();
                     if result.is_ok() {
                         break;

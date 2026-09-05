@@ -252,16 +252,33 @@ impl Repository {
             .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
             .single()
             .ok_or_else(|| ServiceError::Internal("could not build billing period".to_owned()))?;
-        let usage = usage_event::Entity::find()
-            .filter(usage_event::Column::OccurredAt.gte(period_start.fixed_offset()))
-            .filter(usage_event::Column::OccurredAt.lt(now.fixed_offset()))
+        // Batch the initialized projections: steady-state snapshots scale with
+        // keys/accounts, not historical usage and not one DB round-trip per key.
+        let spend_cache: HashMap<_, _> = xscope_entities::billing_month_spend::Entity::find()
+            .filter(
+                xscope_entities::billing_month_spend::Column::Month.eq(period_start.date_naive()),
+            )
             .all(&self.db)
-            .await?;
-        let mut spend = HashMap::<String, i64>::new();
-        for event in usage {
-            *spend.entry(event.api_key_id).or_default() += event.cost_microunits;
-        }
-        let mut account_cache = HashMap::<String, (bool, i64)>::new();
+            .await?
+            .into_iter()
+            .map(|r| (r.api_key_id, r.spent_microunits))
+            .collect();
+        let balances: HashMap<_, _> = xscope_entities::billing_balance::Entity::find()
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|r| (r.billing_account_id, r.balance_microunits))
+            .collect();
+        let mut account_cache: HashMap<_, _> = billing_account::Entity::find()
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .filter_map(|r| {
+                balances
+                    .get(&r.id)
+                    .map(|balance| (r.project_id, (r.enforce_balance, *balance)))
+            })
+            .collect();
         let mut keys = Vec::new();
         for row in api_key::Entity::find()
             .order_by_asc(api_key::Column::Id)
@@ -284,6 +301,12 @@ impl Repository {
                     account_cache.insert(row.project_id.clone(), value);
                     value
                 };
+            let spent = if let Some(value) = spend_cache.get(&row.id) {
+                *value
+            } else {
+                self.projected_spend(&row.project_id, &row.id, period_start.date_naive())
+                    .await?
+            };
             keys.push(GatewayKey {
                 id: row.id.clone(),
                 tenant_id: row.tenant_id,
@@ -300,7 +323,7 @@ impl Repository {
                 },
                 current_month_spend: Money {
                     currency: row.currency.clone(),
-                    amount: ceil_minor_units(*spend.get(&row.id).unwrap_or(&0)),
+                    amount: ceil_minor_units(spent),
                 },
                 balance_enforced,
                 available_balance: Money {
@@ -450,6 +473,12 @@ impl Repository {
                 "reserved requests must use the reservation settlement endpoint".into(),
             ));
         }
+        let monthly = crate::billing_projection::monthly(
+            &transaction,
+            &event.api_key_id,
+            crate::billing_projection::month(event.occurred_at.date_naive()),
+        )
+        .await?;
         let inserted = usage_event::Entity::insert(usage_event::ActiveModel {
             event_id: Set(event.event_id.clone()),
             request_id: Set(event.request_id),
@@ -483,6 +512,7 @@ impl Repository {
             transaction.rollback().await?;
             return Ok(false);
         }
+        crate::billing_projection::change_spend(&transaction, monthly, cost_microunits).await?;
         if cost_microunits > 0 {
             insert_balanced_entries(
                 &transaction,
@@ -555,6 +585,34 @@ impl Repository {
         let row = self.ensure_account_for_project(project_id).await?;
         let (_, balance_microunits) = self.project_balance(project_id).await?;
         Ok(billing_account_from_row(row, balance_microunits))
+    }
+
+    pub async fn billing_position(&self, project_id: &str) -> ServiceResult<serde_json::Value> {
+        let account = self.ensure_account_for_project(project_id).await?;
+        let row = match xscope_entities::billing_balance::Entity::find_by_id(&account.id)
+            .one(&self.db)
+            .await?
+        {
+            Some(row) => row, // Warm console reads never acquire the money lock.
+            None => {
+                let tx = self.db.begin().await?;
+                crate::billing::lock_account(&tx, project_id).await?;
+                let row = crate::billing_projection::account(&tx, &account.id).await?;
+                tx.commit().await?;
+                row
+            }
+        };
+        let available = row
+            .balance_microunits
+            .checked_sub(row.held_microunits)
+            .ok_or_else(|| ServiceError::Internal("available balance overflow".into()))?;
+        // Decimal strings preserve i64 precision across JavaScript clients.
+        Ok(
+            serde_json::json!({"project_id": project_id, "currency": account.currency,
+            "balance_microunits": row.balance_microunits.to_string(),
+            "held_microunits": row.held_microunits.to_string(),
+            "available_microunits": available.to_string(), "updated_at": row.updated_at}),
+        )
     }
 
     pub async fn update_balance_policy(
@@ -1127,17 +1185,18 @@ impl Repository {
 
     async fn project_balance(&self, project_id: &str) -> ServiceResult<(bool, i64)> {
         let account = self.ensure_account_for_project(project_id).await?;
-        let balance = ledger_entry::Entity::find()
-            .filter(ledger_entry::Column::BillingAccountId.eq(&account.id))
-            .filter(ledger_entry::Column::LedgerAccount.eq("customer_balance"))
-            .all(&self.db)
+        if let Some(row) = xscope_entities::billing_balance::Entity::find_by_id(&account.id)
+            .one(&self.db)
             .await?
-            .into_iter()
-            .try_fold(0_i64, |total, entry| {
-                total.checked_add(entry.amount_microunits).ok_or_else(|| {
-                    ServiceError::Internal("billing account balance overflow".to_owned())
-                })
-            })?;
+        {
+            return Ok((account.enforce_balance, row.balance_microunits));
+        }
+        let tx = self.db.begin().await?;
+        crate::billing::lock_account(&tx, project_id).await?;
+        let balance = crate::billing_projection::account(&tx, &account.id)
+            .await?
+            .balance_microunits;
+        tx.commit().await?;
         Ok((account.enforce_balance, balance))
     }
 }
@@ -1222,6 +1281,8 @@ pub(crate) async fn insert_balanced_entries(
             ));
         }
     }
+    crate::billing_projection::change_balance(transaction, &account.id, customer_delta_microunits)
+        .await?;
     let transaction_id = format!("txn-{}", Uuid::now_v7());
     let now = Utc::now().fixed_offset();
     ledger_transaction::ActiveModel {

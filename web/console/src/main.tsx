@@ -1,9 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App as AntApp, ConfigProvider } from "antd";
+import zhCN from "antd/locale/zh_CN";
+import enUS from "antd/locale/en_US";
 import "antd/dist/reset.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { ConsoleApp } from "./App";
+import { useI18n } from "./i18n";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -18,10 +21,11 @@ const queryClient = new QueryClient({
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
 
-createRoot(root).render(
-  <StrictMode>
-    <QueryClientProvider client={queryClient}>
+function LocalizedConsole() {
+  const { locale } = useI18n();
+  return (
       <ConfigProvider
+        locale={locale === "zh-CN" ? zhCN : enUS}
         theme={{
           token: {
             colorPrimary: "#168f70",
@@ -46,6 +50,13 @@ createRoot(root).render(
           <ConsoleApp />
         </AntApp>
       </ConfigProvider>
+  );
+}
+
+createRoot(root).render(
+  <StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <LocalizedConsole />
     </QueryClientProvider>
   </StrictMode>,
 );

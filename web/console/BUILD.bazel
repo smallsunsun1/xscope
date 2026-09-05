@@ -1,7 +1,16 @@
 load("@npm//web:typescript/package_json.bzl", tsc = "bin")
 load("@npm//web:vite/package_json.bzl", vite = "bin")
+load("@npm//web:@playwright/test/package_json.bzl", playwright = "bin")
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@aspect_rules_js//js:defs.bzl", "js_test")
 
 package(default_visibility = ["//visibility:public"])
+
+js_test(
+    name = "format_test",
+    entry_point = "format_test.mjs",
+    data = ["src/format.ts", "src/locale.ts"],
+)
 
 CONSOLE_SRCS = glob([
     "src/**/*.css",
@@ -38,4 +47,50 @@ vite.vite(
     env = {"XSCOPE_BAZEL_BUILD": "1"},
     out_dirs = ["dist"],
     silent_on_success = False,
+)
+
+# Run once per Playwright upgrade. CI also needs OS browser dependencies.
+playwright.playwright_binary(
+    name = "install_browsers",
+    args = ["install", "chromium", "--only-shell"],
+    data = ["//web:node_modules"],
+    tags = ["manual"],
+)
+
+playwright.playwright_test(
+    name = "e2e",
+    size = "large",
+    args = ["test", "--config=web/console/playwright.config.ts"],
+    data = [
+        ":e2e_sources",
+        ":console",
+        "//web:node_modules",
+    ],
+    # Native browsers use the host cache; always rerun and keep on a local executor.
+    env_inherit = ["HOME", "PLAYWRIGHT_BROWSERS_PATH"],
+    tags = ["external", "no-sandbox", "no-remote"],
+)
+
+test_suite(
+    name = "checks",
+    tests = [":typecheck", ":format_test", ":e2e_typecheck", ":e2e"],
+)
+
+tsc.tsc_test(
+    name = "e2e_typecheck",
+    args = ["--project", "web/console/tsconfig.e2e.json", "--noEmit"],
+    data = [
+        ":e2e_sources",
+        "//web:node_modules",
+    ],
+)
+
+# Own shared copy actions once; e2e and typecheck have different sandbox tags.
+js_library(
+    name = "e2e_sources",
+    srcs = glob(["e2e/**"]) + [
+        "playwright.config.ts",
+        "tsconfig.e2e.json",
+        "src/types.ts",
+    ],
 )

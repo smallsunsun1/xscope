@@ -1,6 +1,14 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@xscope_pypi//:requirements.bzl", "requirement")
 
+py_binary(
+    name = "console_preview",
+    srcs = ["console_preview.py"],
+    args = ["$(rlocationpath //web/console:console)"],
+    data = ["//web/console:console"],
+    deps = ["@rules_python//python/runfiles"],
+)
+
 py_test(
     name = "gateway_billing_test",
     srcs = ["gateway_billing_test.py"],
@@ -15,7 +23,19 @@ py_binary(
     srcs = ["billing_protocol_smoke.py"],
     args = ["$(rlocationpath //rust/crates/control-plane)", "$(rlocationpath //rust/crates/gateway)"],
     data = ["//rust/crates/control-plane", "//rust/crates/gateway"],
-    deps = ["@rules_python//python/runfiles"],
+    deps = [":billing_cursor_checks", ":billing_projection_checks", "@rules_python//python/runfiles"],
+)
+
+py_library(
+    name = "billing_projection_checks",
+    srcs = ["billing_projection_checks.py"],
+    imports = ["."],
+)
+
+py_library(
+    name = "billing_cursor_checks",
+    srcs = ["billing_cursor_checks.py"],
+    imports = ["."],
 )
 
 py_binary(
@@ -27,6 +47,12 @@ py_binary(
 py_binary(
     name = "deploy_gateway_billing",
     srcs = ["deploy_gateway_billing.py"],
+    deps = [":observability_cluster"],
+)
+
+py_test(
+    name = "gateway_snapshot_test",
+    srcs = ["gateway_snapshot_test.py", "deploy_gateway_billing.py"],
     deps = [":observability_cluster"],
 )
 

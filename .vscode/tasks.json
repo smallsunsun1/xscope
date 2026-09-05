@@ -19,6 +19,14 @@
       "problemMatcher": []
     },
     {
+      "label": "Bazel: format Rust",
+      "type": "process",
+      "command": "bazel",
+      "args": ["run", "@rules_rust//:rustfmt", "--", "//rust/crates/..."],
+      "options": {"cwd": "${workspaceFolder}"},
+      "problemMatcher": []
+    },
+    {
       "label": "Bazel: test",
       "type": "process",
       "command": "bazel",

@@ -1,0 +1,3 @@
+# Keep local operational output-base symlinks out of recursive //... discovery.
+.build
+web/console/node_modules

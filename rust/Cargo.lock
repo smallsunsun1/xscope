@@ -5699,6 +5699,7 @@ dependencies = [
 name = "xscope-cluster-agent"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "kube",
  "serde",
@@ -5716,6 +5717,7 @@ dependencies = [
 name = "xscope-control-plane"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "base64",
  "chrono",
@@ -5761,6 +5763,7 @@ dependencies = [
 name = "xscope-gateway"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arc-swap",
  "async-trait",
  "base64",
@@ -5768,6 +5771,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "http",
+ "nix 0.29.0",
  "pingora-core",
  "pingora-error",
  "pingora-http",
@@ -5818,6 +5822,7 @@ dependencies = [
 name = "xscope-operator"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "futures",
  "k8s-openapi",
@@ -5834,6 +5839,7 @@ dependencies = [
 name = "xscope-telemetry"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "http",
  "opentelemetry",

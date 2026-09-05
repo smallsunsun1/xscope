@@ -3,6 +3,8 @@ pub mod billing;
 pub mod config;
 pub mod proxy;
 pub mod quota;
+mod segments;
+pub mod storage;
 mod streaming;
 pub mod usage;
 mod wal;

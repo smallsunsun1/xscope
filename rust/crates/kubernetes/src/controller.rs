@@ -60,6 +60,7 @@ pub fn desired(
     let owner = model
         .controller_owner_ref(&())
         .ok_or_else(|| Error::Invalid("resource UID missing".into()))?;
+    let deployment_uid = owner.uid.clone();
     let mut labels = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), name.clone()),
         ("app.kubernetes.io/component".into(), "model-runtime".into()),
@@ -87,10 +88,7 @@ pub fn desired(
     }
     let port = model.spec.runtime.port;
     let selector = labels.clone();
-    labels.insert(
-        "platform.xscope.io/deployment-uid".into(),
-        model.uid().unwrap(),
-    );
+    labels.insert("platform.xscope.io/deployment-uid".into(), deployment_uid);
     labels.insert("app.kubernetes.io/part-of".into(), "xscope".into());
     let metadata = json!({"name":name,"namespace":namespace,"ownerReferences":[owner]});
     let deployment = serde_json::from_value(json!({
@@ -195,19 +193,26 @@ async fn reconcile_inner(model: &ModelDeployment, context: &Context) -> Result<A
         let picker = services.get_opt(&serving.endpoint_picker_service).await?;
         resources::validate_picker(picker.as_ref(), model)?;
     }
-    let selector = deployment
+    let selector_labels = deployment
         .spec
         .as_ref()
-        .unwrap()
+        .ok_or_else(|| Error::Invalid("desired Deployment spec is missing".into()))?
         .selector
         .match_labels
         .as_ref()
-        .unwrap()
+        .ok_or_else(|| Error::Invalid("desired Deployment selector labels are missing".into()))?;
+    let selector = selector_labels
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(",");
-    let service_port = service.spec.as_ref().unwrap().ports.as_ref().unwrap()[0].port;
+    let service_port = service
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.ports.as_ref())
+        .and_then(|ports| ports.first())
+        .map(|port| port.port)
+        .ok_or_else(|| Error::Invalid("desired Service port is missing".into()))?;
     // Change scaling writers only after observing deletion, never in the same
     // reconciliation that requested it. KEDA's HPA is read-only to XScope.
     match autoscaling::transition(model, old_scaler.as_ref(), &all_hpas) {
@@ -249,7 +254,7 @@ async fn reconcile_inner(model: &ModelDeployment, context: &Context) -> Result<A
         .cloned();
     let deployment = resources::sync(&deployments, model, existing, Some(deployment))
         .await?
-        .unwrap();
+        .ok_or_else(|| Error::Invalid("Deployment sync returned no resource".into()))?;
     resources::sync(&services, model, existing_service, Some(service)).await?;
     resources::sync(&pdbs, model, old_pdb, optional.pdb).await?;
     resources::sync(&pools, model, old_pool, optional.pool).await?;
@@ -427,7 +432,10 @@ async fn write_status(
     status: ModelDeploymentStatus,
 ) -> Result<(), Error> {
     if model.status.as_ref() != Some(&status) {
-        Api::<ModelDeployment>::namespaced(context.client.clone(), &model.namespace().unwrap())
+        let namespace = model
+            .namespace()
+            .ok_or_else(|| Error::Invalid("namespace missing".into()))?;
+        Api::<ModelDeployment>::namespaced(context.client.clone(), &namespace)
             .patch_status(
                 &model.name_any(),
                 &PatchParams::default(),
@@ -445,6 +453,8 @@ pub fn error_policy(_model: Arc<ModelDeployment>, error: &Error, _context: Arc<C
 }
 
 #[cfg(test)]
+// Test fixture setup and response assertions deliberately panic at the failing boundary.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     #[test]
