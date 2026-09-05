@@ -1,5 +1,63 @@
-load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@xscope_pypi//:requirements.bzl", "requirement")
+
+py_test(
+    name = "gateway_billing_test",
+    srcs = ["gateway_billing_test.py"],
+    args = ["$(rlocationpath //rust/crates/gateway)"],
+    data = ["//rust/crates/gateway"],
+    deps = ["@rules_python//python/runfiles"],
+    size = "medium",
+)
+
+py_binary(
+    name = "billing_protocol_smoke",
+    srcs = ["billing_protocol_smoke.py"],
+    args = ["$(rlocationpath //rust/crates/control-plane)", "$(rlocationpath //rust/crates/gateway)"],
+    data = ["//rust/crates/control-plane", "//rust/crates/gateway"],
+    deps = ["@rules_python//python/runfiles"],
+)
+
+py_binary(
+    name = "deploy_billing_protocol",
+    srcs = ["deploy_billing_protocol.py"],
+    deps = [":observability_cluster"],
+)
+
+py_binary(
+    name = "deploy_gateway_billing",
+    srcs = ["deploy_gateway_billing.py"],
+    deps = [":observability_cluster"],
+)
+
+py_binary(
+    name = "billing_protocol_cluster_check",
+    srcs = ["billing_protocol_cluster_check.py"],
+    deps = [":observability_cluster"],
+)
+
+py_test(
+    name = "usage_recovery_test",
+    srcs = ["usage_recovery_test.py"],
+    args = ["$(rlocationpath //rust/crates/gateway)"],
+    data = ["//rust/crates/gateway"],
+    deps = ["@rules_python//python/runfiles"],
+    size = "medium",
+)
+
+py_binary(
+    name = "quota_recovery_smoke",
+    srcs = ["quota_recovery_smoke.py"],
+    args = ["$(rlocationpath //rust/crates/gateway)", "$(rlocationpath //python:runtime)"],
+    data = ["//rust/crates/gateway", "//python:runtime"],
+    deps = ["@rules_python//python/runfiles"],
+)
+
+py_binary(
+    name = "deploy_usage_recovery",
+    srcs = ["deploy_usage_recovery.py"],
+    deps = [":observability_cluster"],
+)
 
 py_test(
     name = "streaming_e2e_test",
@@ -21,14 +79,116 @@ py_binary(
 )
 
 py_binary(
+    name = "install_local_metrics",
+    srcs = ["install_local_metrics.py"],
+    args = ["$(location @metrics_server_manifest//file)"],
+    data = ["@metrics_server_manifest//file"],
+    deps = [":observability_cluster", requirement("pyyaml")],
+)
+
+py_library(
+    name = "keda_installer",
+    srcs = ["install_local_keda.py"],
+    deps = [":observability_cluster", requirement("pyyaml")],
+)
+
+py_binary(
+    name = "install_local_keda",
+    srcs = ["install_local_keda.py"],
+    args = ["$(location @keda_manifest//file)"],
+    data = ["@keda_manifest//file"],
+    deps = [":observability_cluster", requirement("pyyaml")],
+)
+
+py_test(
+    name = "keda_config_test",
+    srcs = ["keda_config_test.py"],
+    args = ["$(location @keda_manifest//file)"],
+    data = ["@keda_manifest//file"],
+    deps = [":keda_installer", requirement("pyyaml")],
+)
+
+py_binary(
+    name = "deploy_keda_operator",
+    srcs = ["deploy_keda_operator.py"],
+    deps = [":observability_cluster", requirement("pyyaml")],
+)
+
+py_binary(
+    name = "deploy_operator",
+    srcs = ["deploy_operator.py"],
+    deps = [":observability_cluster", requirement("pyyaml")],
+)
+
+py_binary(
+    name = "operator_cluster_smoke",
+    srcs = ["operator_cluster_smoke.py"],
+    deps = [":observability_cluster", requirement("pyyaml")],
+)
+
+py_binary(
     name = "telemetry_cluster_smoke",
     srcs = ["telemetry_cluster_smoke.py"],
+)
+
+py_library(
+    name = "observability_cluster",
+    srcs = ["observability_cluster.py"],
+    imports = ["."],
+)
+
+py_binary(
+    name = "observability_admin",
+    srcs = ["observability_admin.py"],
+)
+
+py_binary(
+    name = "observability_migrate",
+    srcs = ["observability_migrate.py"],
+    deps = [":observability_cluster"],
+)
+
+py_binary(
+    name = "observability_persistence_smoke",
+    srcs = ["observability_persistence_smoke.py"],
+    deps = [":observability_cluster"],
+)
+
+py_binary(
+    name = "trace_dashboard_smoke",
+    srcs = ["trace_dashboard_smoke.py"],
+    deps = [":observability_cluster"],
+)
+
+py_binary(
+    name = "deploy_grafana_dashboards",
+    srcs = ["deploy_grafana_dashboards.py"],
+    deps = [":observability_cluster", requirement("pyyaml")],
+)
+
+py_binary(
+    name = "deploy_routing",
+    srcs = ["deploy_routing.py"],
+    deps = [":observability_cluster", requirement("pyyaml")],
+)
+
+py_binary(
+    name = "routing_cluster_smoke",
+    srcs = ["routing_cluster_smoke.py"],
+    deps = [":observability_cluster"],
+)
+
+py_test(
+    name = "trace_dashboard_config_test",
+    srcs = ["trace_dashboard_config_test.py"],
+    args = ["$(location //deploy/k8s/observability:grafana-traces.json)", "$(location //deploy/k8s/observability:grafana-dashboard.json)"],
+    data = ["//deploy/k8s/observability:grafana-traces.json", "//deploy/k8s/observability:grafana-dashboard.json"],
 )
 
 py_test(
     name = "observability_config_test",
     srcs = ["observability_config_test.py"],
-    args = ["$(location //deploy/k8s/observability:resources.yaml)", "$(location //deploy/k8s/observability:prometheus.yaml)", "$(location //deploy/k8s/observability:jaeger.yaml)"],
-    data = ["//deploy/k8s/observability:resources.yaml", "//deploy/k8s/observability:prometheus.yaml", "//deploy/k8s/observability:jaeger.yaml"],
+    args = ["$(location //deploy/k8s/observability:resources.yaml)", "$(location //deploy/k8s/observability:prometheus.yaml)", "$(location //deploy/k8s/observability:jaeger.yaml)", "$(location //deploy/k8s/observability:storage.yaml)", "$(location //deploy/k8s/observability:grafana.yaml)", "$(location //deploy/k8s/observability:grafana-datasources.yaml)", "$(location //deploy/k8s/observability:grafana-dashboard.json)", "$(location //:deploy/k8s/overlays/local/kustomization.yaml)", "$(location //:deploy/k8s/overlays/local/grafana-service.yaml)", "$(location //:deploy/k8s/overlays/local/grafana-ingress.yaml)"],
+    data = ["//deploy/k8s/observability:resources.yaml", "//deploy/k8s/observability:prometheus.yaml", "//deploy/k8s/observability:jaeger.yaml", "//deploy/k8s/observability:storage.yaml", "//deploy/k8s/observability:grafana.yaml", "//deploy/k8s/observability:grafana-datasources.yaml", "//deploy/k8s/observability:grafana-dashboard.json", "//:deploy/k8s/overlays/local/kustomization.yaml", "//:deploy/k8s/overlays/local/grafana-service.yaml", "//:deploy/k8s/overlays/local/grafana-ingress.yaml"],
     deps = [requirement("pyyaml")],
 )

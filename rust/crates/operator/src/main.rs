@@ -10,6 +10,8 @@ use std::{sync::Arc, time::Duration};
 use xscope_kubernetes::{
     api::ModelDeployment,
     controller::{Context, error_policy, reconcile},
+    pool::InferencePool,
+    resources::{Hpa, Pdb},
 };
 
 fn env(name: &str, fallback: &str) -> String {
@@ -33,6 +35,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         client: client.clone(),
         cluster_id: env("XSCOPE_CLUSTER_ID", "local"),
         region: env("XSCOPE_REGION", "local"),
+        prometheus_address: env(
+            "XSCOPE_AUTOSCALING_PROMETHEUS_URL",
+            "http://prometheus.xscope-system.svc:9090",
+        ),
     });
     let listener =
         tokio::net::TcpListener::bind(env("XSCOPE_OPERATOR_ADDRESS", "0.0.0.0:8082")).await?;
@@ -80,7 +86,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     controller = Some(tokio::spawn(async move {
                         Controller::new(Api::<ModelDeployment>::all(client.clone()), watcher::Config::default())
                             .owns(Api::<Deployment>::all(client.clone()), watcher::Config::default())
-                            .owns(Api::<Service>::all(client), watcher::Config::default())
+                            .owns(Api::<Service>::all(client.clone()), watcher::Config::default())
+                            .owns(Api::<Hpa>::all(client.clone()), watcher::Config::default())
+                            .owns(Api::<Pdb>::all(client.clone()), watcher::Config::default())
+                            .owns(Api::<InferencePool>::all(client), watcher::Config::default())
                             .run(reconcile, error_policy, context)
                             .for_each(|result| async { if let Err(error) = result { tracing::warn!(%error,"controller stream error"); } }).await;
                     }));

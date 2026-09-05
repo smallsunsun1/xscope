@@ -71,6 +71,7 @@ def main():
     try:
         assert response.status == 200, (response.status, response.read())
         assert "text/event-stream" in response.getheader("Content-Type", "")
+        stream_billing_id = response.getheader("x-xscope-billing-request-id", stream_id)
         first = response.readline()
         first_time = time.monotonic() - started
         data = first + response.read()
@@ -96,6 +97,7 @@ def main():
     cancel_id, connection, response = request("cancel", text="word " * 200)
     try:
         assert response.status == 200, (response.status, response.read())
+        cancel_billing_id = response.getheader("x-xscope-billing-request-id")
         while True:
             line = response.readline()
             assert line, "stream ended before the first content token"
@@ -126,16 +128,23 @@ def main():
     # Identifiers are generated hex + fixed suffixes, never interpolated user input.
     def persisted():
         sql = ("SELECT request_id,status,input_tokens,output_tokens FROM xscope.usage_events "
-               f"WHERE request_id IN ('{stream_id}','{cancel_id}') ORDER BY request_id")
+               f"WHERE request_id IN ('{stream_billing_id}','{cancel_billing_id or cancel_id}') ORDER BY request_id")
         rows = kubectl("-n", namespace, "exec", "statefulset/postgres", "--", "psql",
                        "-U", "xscope", "-d", "keycloak", "-At", "-c", sql)
-        return rows if f"{stream_id}|succeeded|" in rows and f"{cancel_id}|cancelled|" in rows else None
+        if f"{stream_billing_id}|succeeded|" not in rows:
+            return None
+        if cancel_billing_id:
+            state = kubectl("-n", namespace, "exec", "statefulset/postgres", "--", "psql", "-U", "xscope", "-d", "keycloak", "-At", "-c",
+                f"SELECT state FROM xscope.billing_reservations WHERE id='{cancel_billing_id}'").strip()
+            # Runtime cancellation before final usage is ambiguous, not a zero charge.
+            return rows + f"cancel reservation {cancel_billing_id}: {state}\n" if state == "dispatched" else None
+        return rows if f"{cancel_id}|cancelled|" in rows else None
     print("PASS persisted usage outcomes:\n" + eventually(persisted).strip())
     def balanced_ledger():
         sql = ("SELECT COUNT(DISTINCT t.id), COUNT(e.id), SUM(e.amount_microunits) "
                "FROM xscope.ledger_transactions t JOIN xscope.ledger_entries e ON e.transaction_id=t.id "
                "JOIN xscope.usage_events u ON u.event_id=t.reference_id "
-               f"WHERE u.request_id='{stream_id}'")
+               f"WHERE u.request_id='{stream_billing_id}'")
         return kubectl("-n", namespace, "exec", "statefulset/postgres", "--", "psql",
                        "-U", "xscope", "-d", "keycloak", "-At", "-c", sql).strip() == "1|2|0"
     eventually(balanced_ledger)

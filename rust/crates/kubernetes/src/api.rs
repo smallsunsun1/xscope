@@ -24,6 +24,10 @@ pub struct ModelDeploymentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autoscaling: Option<AutoscalingSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disruption_budget: Option<DisruptionBudgetSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving: Option<ServingSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout: Option<RolloutSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_selector: Option<BTreeMap<String, String>>,
@@ -54,12 +58,40 @@ fn default_port() -> i32 {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AutoscalingSpec {
-    #[serde(default)]
+    #[serde(default = "one")]
     pub min_replicas: i32,
     #[serde(default)]
     pub max_replicas: i32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub target_pending_requests: i32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub target_running_requests: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_cpu_utilization_percentage: Option<i32>,
+}
+fn one() -> i32 {
+    1
+}
+fn is_zero(value: &i32) -> bool {
+    *value == 0
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DisruptionBudgetSpec {
+    pub max_unavailable: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServingSpec {
+    /// Installation-owned, same-namespace Service. One EPP deployment per pool.
+    pub endpoint_picker_service: String,
+    #[serde(default = "epp_port")]
+    pub endpoint_picker_port: i32,
+}
+fn epp_port() -> i32 {
+    9002
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -79,6 +111,14 @@ pub struct ModelDeploymentStatus {
     pub observed_generation: i64,
     #[serde(default)]
     pub ready_replicas: i32,
+    #[serde(default)]
+    pub replicas: i32,
+    #[serde(default)]
+    pub selector: String,
+    #[serde(default)]
+    pub inference_pool: String,
+    #[serde(default)]
+    pub endpoint_picker_service: String,
     #[serde(default)]
     pub endpoint: String,
     #[serde(default)]
@@ -111,7 +151,16 @@ pub fn validate_name(name: &str, namespace: bool) -> Result<(), Error> {
     Ok(())
 }
 pub fn validate(model: &mut ModelDeployment) -> Result<(), Error> {
-    validate_name(&model.name_any(), false)?;
+    let model_name = model.name_any();
+    validate_name(&model.name_any(), true)?;
+    if !model
+        .name_any()
+        .starts_with(|c: char| c.is_ascii_lowercase())
+    {
+        return Err(Error::Invalid(
+            "ModelDeployment name must start with a lowercase letter (Service DNS label)".into(),
+        ));
+    }
     validate_name(&model.namespace().unwrap_or_default(), true)?;
     let spec = &mut model.spec;
     if spec.model.id.is_empty()
@@ -152,11 +201,58 @@ pub fn validate(model: &mut ModelDeployment) -> Result<(), Error> {
             "invalid runtime port or negative replicas".into(),
         ));
     }
+    if let Some(scaling) = &spec.autoscaling {
+        if scaling.min_replicas < 1
+            || scaling.max_replicas < scaling.min_replicas
+            || spec.replicas < scaling.min_replicas
+            || spec.replicas > scaling.max_replicas
+            || scaling.target_pending_requests < 0
+            || scaling.target_running_requests < 0
+            || scaling
+                .target_cpu_utilization_percentage
+                .is_some_and(|value| !(1..=100).contains(&value))
+        {
+            return Err(Error::Invalid("autoscaling requires 1 <= minReplicas <= replicas <= maxReplicas and CPU target 1..100".into()));
+        }
+        if (scaling.target_pending_requests > 0 || scaling.target_running_requests > 0)
+            && spec.serving.is_none()
+        {
+            return Err(Error::Invalid(
+                "EPP scaling requires a pool-specific serving entry".into(),
+            ));
+        }
+        if (scaling.target_pending_requests == 0 && scaling.target_running_requests == 0)
+            || scaling.target_cpu_utilization_percentage.is_some()
+        {
+            let cpu = spec.resources.requests.as_ref().and_then(|r| r.get("cpu"));
+            if cpu.is_none_or(|cpu| cpu.0.trim().is_empty()) {
+                return Err(Error::Invalid("CPU autoscaling requires resources.requests.cpu (quantity validation belongs to Kubernetes)".into()));
+            }
+        }
+    }
+    if spec
+        .disruption_budget
+        .as_ref()
+        .is_some_and(|pdb| pdb.max_unavailable < 0)
+    {
+        return Err(Error::Invalid("maxUnavailable must be non-negative".into()));
+    }
+    if let Some(serving) = &spec.serving {
+        validate_name(&serving.endpoint_picker_service, true)?;
+        if serving.endpoint_picker_service == model_name
+            || !(1..=65535).contains(&serving.endpoint_picker_port)
+            || spec.runtime.protocol != "openai"
+        {
+            return Err(Error::Invalid(
+                "serving requires OpenAI protocol, a separate EPP Service and valid port".into(),
+            ));
+        }
+    }
     if let Some(rollout) = &mut spec.rollout {
         if rollout.strategy.is_empty() {
             rollout.strategy = rolling();
         }
-        if rollout.strategy != "rolling" {
+        if rollout.strategy != "rolling" || rollout.canary_weight != 0 {
             return Err(Error::Invalid("only rolling is currently supported".into()));
         }
     }

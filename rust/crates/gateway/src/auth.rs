@@ -15,6 +15,7 @@ use crate::config::ApiKeyConfig;
 
 #[derive(Clone, Debug)]
 pub struct Principal {
+    route_policies: Vec<xscope_domain::RoutePolicy>,
     pub api_key_id: String,
     pub tenant_id: String,
     pub project_id: String,
@@ -29,6 +30,11 @@ pub struct Principal {
 }
 
 impl Principal {
+    pub fn route_policy(&self, model: &str) -> Option<&xscope_domain::RoutePolicy> {
+        self.route_policies
+            .iter()
+            .find(|policy| policy.model == model)
+    }
     #[must_use]
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.iter().any(|candidate| candidate == scope)
@@ -87,6 +93,8 @@ pub struct DynamicKeySet {
 #[derive(Debug, Deserialize)]
 struct GatewaySnapshot {
     keys: Vec<GatewayKey>,
+    #[serde(default)]
+    route_policies: Vec<xscope_domain::RoutePolicy>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +128,8 @@ const fn default_rate_limit_tpm() -> u64 {
 
 #[derive(Debug, Error)]
 enum SnapshotError {
+    #[error("invalid or duplicate route policy in snapshot")]
+    InvalidRoutePolicy,
     #[error("snapshot request failed: {0}")]
     Request(#[from] reqwest::Error),
     #[error("API key {0} has an invalid SHA-256 digest")]
@@ -235,6 +245,7 @@ impl KeySet {
                 .iter()
                 .map(|config| Credential {
                     principal: Principal {
+                        route_policies: Vec::new(),
                         api_key_id: config.id.clone(),
                         tenant_id: config.tenant_id.clone(),
                         project_id: config.project_id.clone(),
@@ -255,6 +266,15 @@ impl KeySet {
     }
 
     fn from_snapshot(snapshot: GatewaySnapshot) -> Result<Self, SnapshotError> {
+        let mut identities = std::collections::HashSet::new();
+        for policy in &snapshot.route_policies {
+            if policy.revision <= 0
+                || policy.spec.validate().is_err()
+                || !identities.insert((&policy.tenant_id, &policy.project_id, &policy.model))
+            {
+                return Err(SnapshotError::InvalidRoutePolicy);
+            }
+        }
         let mut credentials = Vec::with_capacity(snapshot.keys.len());
         for key in snapshot.keys {
             let digest = base64::engine::general_purpose::STANDARD
@@ -265,6 +285,12 @@ impl KeySet {
                 .map_err(|_| SnapshotError::InvalidDigest(key.id.clone()))?;
             credentials.push(Credential {
                 principal: Principal {
+                    route_policies: snapshot
+                        .route_policies
+                        .iter()
+                        .filter(|p| p.tenant_id == key.tenant_id && p.project_id == key.project_id)
+                        .cloned()
+                        .collect(),
                     api_key_id: key.id,
                     tenant_id: key.tenant_id,
                     project_id: key.project_id,

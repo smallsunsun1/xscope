@@ -1,0 +1,43 @@
+# Optional local echo revision. This is not a GPU/vLLM model deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runtime-canary
+  namespace: xscope-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: runtime-canary }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: runtime-canary, app.kubernetes.io/part-of: xscope }
+    spec:
+      containers:
+        - name: runtime
+          image: xscope/runtime:dev
+          imagePullPolicy: IfNotPresent
+          envFrom: [{ configMapRef: { name: xscope-config } }]
+          ports: [{ name: http, containerPort: 8090 }]
+          readinessProbe: { httpGet: { path: /readyz, port: http } }
+          livenessProbe: { httpGet: { path: /healthz, port: http } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true }
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { cpu: 300m, memory: 192Mi }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: runtime-canary-ingress
+  namespace: xscope-system
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: runtime-canary }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: inference-serving-canary }
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: control-plane }
+      ports: [{ protocol: TCP, port: 8090 }]

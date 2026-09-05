@@ -32,6 +32,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 xscope-telemetry = { path = "../telemetry" }
+xscope-domain = { path = "../domain" }
 
 [lints]
 workspace = true

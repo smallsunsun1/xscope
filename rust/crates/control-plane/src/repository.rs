@@ -5,7 +5,7 @@ use chrono::{DateTime, Datelike, FixedOffset, TimeZone, Utc};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
-    DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, TransactionTrait,
+    DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -26,8 +26,8 @@ use crate::error::{ServiceError, ServiceResult};
 
 #[derive(Clone)]
 pub struct Repository {
-    db: DatabaseConnection,
-    model: Model,
+    pub(crate) db: DatabaseConnection,
+    pub(crate) model: Model,
 }
 
 impl Repository {
@@ -312,6 +312,103 @@ impl Repository {
         Ok(GatewaySnapshot {
             generated_at: now,
             keys,
+            route_policies: self.list_route_policies().await?,
+        })
+    }
+
+    pub async fn get_project(&self, id: &str) -> ServiceResult<Project> {
+        project::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?
+            .map(project_from_row)
+            .ok_or(ServiceError::NotFound)
+    }
+
+    pub async fn list_route_policies(&self) -> ServiceResult<Vec<xscope_domain::RoutePolicy>> {
+        let projects: HashMap<_, _> = self
+            .list_projects()
+            .await?
+            .into_iter()
+            .map(|p| (p.id, p.tenant_id))
+            .collect();
+        xscope_entities::route_policy::Entity::find()
+            .order_by_asc(xscope_entities::route_policy::Column::ProjectId)
+            .order_by_asc(xscope_entities::route_policy::Column::Model)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok(xscope_domain::RoutePolicy {
+                    tenant_id: projects
+                        .get(&row.project_id)
+                        .cloned()
+                        .ok_or(ServiceError::NotFound)?,
+                    project_id: row.project_id,
+                    model: row.model,
+                    revision: row.revision,
+                    spec: serde_json::from_value(row.spec)
+                        .map_err(|e| ServiceError::Internal(e.to_string()))?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn put_route_policy(
+        &self,
+        project: &Project,
+        model: &str,
+        request: xscope_domain::PutRoutePolicy,
+        pools: &[xscope_domain::RoutePool],
+    ) -> ServiceResult<xscope_domain::RoutePolicy> {
+        use sea_orm::sea_query::Expr;
+        use xscope_entities::route_policy::{ActiveModel, Column, Entity};
+        request
+            .spec
+            .validate_pools(model, pools)
+            .map_err(ServiceError::Invalid)?;
+        if model != self.model.id || !(0..i64::MAX).contains(&request.expected_revision) {
+            return Err(ServiceError::Invalid(
+                "unknown model or invalid expected_revision".into(),
+            ));
+        }
+        let revision = request.expected_revision + 1;
+        let spec = serde_json::to_value(&request.spec)
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+        let now = Utc::now().fixed_offset();
+        if request.expected_revision == 0 {
+            ActiveModel {
+                project_id: Set(project.id.clone()),
+                model: Set(model.to_owned()),
+                revision: Set(revision),
+                spec: Set(spec),
+                updated_at: Set(now),
+            }
+            .insert(&self.db)
+            .await
+            .map_err(conflict_or_database)?;
+        } else {
+            // Atomic compare-and-swap; rollback also advances revision.
+            let result = Entity::update_many()
+                .col_expr(Column::Revision, Expr::value(revision))
+                .col_expr(Column::Spec, Expr::value(spec))
+                .col_expr(Column::UpdatedAt, Expr::value(now))
+                .filter(Column::ProjectId.eq(&project.id))
+                .filter(Column::Model.eq(model))
+                .filter(Column::Revision.eq(request.expected_revision))
+                .exec(&self.db)
+                .await?;
+            if result.rows_affected != 1 {
+                return Err(ServiceError::Conflict(
+                    "route policy revision changed; reload before saving".into(),
+                ));
+            }
+        }
+        Ok(xscope_domain::RoutePolicy {
+            tenant_id: project.tenant_id.clone(),
+            project_id: project.id.clone(),
+            model: model.to_owned(),
+            revision,
+            spec: request.spec,
         })
     }
 
@@ -341,6 +438,18 @@ impl Repository {
         };
         let account = self.ensure_account_for_project(&event.project_id).await?;
         let transaction = self.db.begin().await?;
+        crate::billing::lock_account(&transaction, &event.project_id).await?;
+        if xscope_entities::billing_reservation::Entity::find()
+            .filter(xscope_entities::billing_reservation::Column::ProjectId.eq(&event.project_id))
+            .filter(xscope_entities::billing_reservation::Column::RequestId.eq(&event.request_id))
+            .one(&transaction)
+            .await?
+            .is_some()
+        {
+            return Err(ServiceError::Conflict(
+                "reserved requests must use the reservation settlement endpoint".into(),
+            ));
+        }
         let inserted = usage_event::Entity::insert(usage_event::ActiveModel {
             event_id: Set(event.event_id.clone()),
             request_id: Set(event.request_id),
@@ -530,6 +639,7 @@ impl Repository {
         }
         let transaction = self.db.begin().await?;
         let order = billing_order::Entity::find_by_id(order_id)
+            .lock_exclusive()
             .one(&transaction)
             .await?
             .ok_or(ServiceError::NotFound)?;
@@ -616,6 +726,7 @@ impl Repository {
         }
         let transaction = self.db.begin().await?;
         let payment = payment::Entity::find_by_id(&request.payment_id)
+            .lock_exclusive()
             .one(&transaction)
             .await?
             .ok_or(ServiceError::NotFound)?;
@@ -1081,7 +1192,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn insert_balanced_entries(
+pub(crate) async fn insert_balanced_entries(
     transaction: &DatabaseTransaction,
     account: &billing_account::Model,
     tenant_id: &str,
@@ -1097,6 +1208,19 @@ async fn insert_balanced_entries(
         return Err(ServiceError::Invalid(
             "ledger amount is too large".to_owned(),
         ));
+    }
+    let locked = crate::billing::lock_account(transaction, &account.project_id).await?;
+    if customer_delta_microunits < 0 && locked.enforce_balance {
+        let (balance, held) = crate::billing::balance_and_held(transaction, &locked.id).await?;
+        if balance
+            .checked_sub(held)
+            .and_then(|v| v.checked_add(customer_delta_microunits))
+            .is_none_or(|v| v < 0)
+        {
+            return Err(ServiceError::InsufficientFunds(
+                "debit would consume unavailable or reserved balance".into(),
+            ));
+        }
     }
     let transaction_id = format!("txn-{}", Uuid::now_v7());
     let now = Utc::now().fixed_offset();
@@ -1130,6 +1254,8 @@ async fn insert_balanced_entries(
         .insert(transaction)
         .await?;
     }
+    crate::billing::append_event(transaction, &account.id, "ledger.posted", &transaction_id,
+        serde_json::json!({"kind": kind, "reference_type": reference_type, "reference_id": reference_id, "customer_delta_microunits": customer_delta_microunits, "currency": account.currency})).await?;
     Ok(())
 }
 
@@ -1177,7 +1303,7 @@ fn is_chargeable_usage(event: &UsageEvent) -> bool {
     event.status == "succeeded" && (event.input_tokens > 0 || event.output_tokens > 0)
 }
 
-fn conflict_or_database(error: sea_orm::DbErr) -> ServiceError {
+pub(crate) fn conflict_or_database(error: sea_orm::DbErr) -> ServiceError {
     if error.to_string().contains("duplicate key")
         || error.to_string().contains("unique constraint")
     {

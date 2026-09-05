@@ -3,6 +3,17 @@ export type Health = {
   component?: string;
 };
 
+export type RoutePool = { id: string; model: string; revision: string };
+export type RoutePolicySpec = {
+  stable_pool: string;
+  canary_pool: string | null;
+  canary_percent: number;
+  headers: { name: string; value: string; target: "stable" | "canary" }[];
+};
+export type RoutePolicy = {
+  tenant_id: string; project_id: string; model: string; revision: number; spec: RoutePolicySpec;
+};
+
 export type Session = {
   id?: string;
   username: string;

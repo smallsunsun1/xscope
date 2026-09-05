@@ -49,6 +49,20 @@ oci.pull(
 )
 use_repo(oci, "runtime_base", "runtime_base_linux_amd64", "runtime_base_linux_arm64_v8")
 
+http_file(
+    name = "metrics_server_manifest",
+    downloaded_file_path = "components.yaml",
+    sha256 = "4a672c4891902573a3ff753cece5de1bf1f55dd053403dfec39df9d1636b7ff1",
+    urls = ["https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.1/components.yaml"],
+)
+
+http_file(
+    name = "keda_manifest",
+    downloaded_file_path = "keda.yaml",
+    sha256 = "11c2c88a126c33d21a81315c9462ba410e27a87598b5ddae7a1fdd6eff376ef7",
+    urls = ["https://github.com/kedacore/keda/releases/download/v2.20.1/keda-2.20.1.yaml"],
+)
+
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(node_version = "24.13.0")
 
@@ -68,7 +82,7 @@ python_config.explicit_init_py(default = True)
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
-    versions = ["1.94.0"],
+    versions = ["1.98.1"],
 )
 use_repo(rust, "rust_toolchains")
 

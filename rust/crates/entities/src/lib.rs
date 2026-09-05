@@ -1,6 +1,9 @@
 pub mod api_key;
 pub mod billing_account;
+pub mod billing_consumer;
+pub mod billing_event;
 pub mod billing_order;
+pub mod billing_reservation;
 pub mod idempotency_record;
 pub mod invoice;
 pub mod ledger_entry;
@@ -9,5 +12,6 @@ pub mod payment;
 pub mod platform_user;
 pub mod project;
 pub mod refund;
+pub mod route_policy;
 pub mod tenant_membership;
 pub mod usage_event;

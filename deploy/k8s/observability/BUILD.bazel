@@ -1,1 +1,12 @@
-exports_files(["prometheus.yaml", "jaeger.yaml", "alerts.yaml", "resources.yaml"])
+exports_files([
+    "prometheus.yaml",
+    "jaeger.yaml",
+    "alerts.yaml",
+    "resources.yaml",
+    "storage.yaml",
+    "grafana.yaml",
+    "grafana-datasources.yaml",
+    "grafana-provider.yaml",
+    "grafana-dashboard.json",
+    "grafana-traces.json",
+])

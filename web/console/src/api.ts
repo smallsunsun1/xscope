@@ -22,6 +22,9 @@ import type {
   ReconcileRequest,
   Refund,
   Session,
+  RoutePool,
+  RoutePolicy,
+  RoutePolicySpec,
 } from "./types";
 
 const controlBase = import.meta.env.VITE_CONTROL_API_BASE ?? "/api";
@@ -68,6 +71,12 @@ function idempotencyKey(prefix: string): string {
 }
 
 export const api = {
+  routePools: async () => (await request<ListResponse<RoutePool>>("/admin/v1/route-pools")).data,
+  routePolicies: async () => (await request<ListResponse<RoutePolicy>>("/admin/v1/route-policies")).data,
+  putRoutePolicy: (project: string, model: string, expected_revision: number, spec: RoutePolicySpec) =>
+    request<RoutePolicy>(`/admin/v1/projects/${encodeURIComponent(project)}/models/${encodeURIComponent(model)}/route-policy`, {
+      method: "PUT", body: JSON.stringify({ expected_revision, spec }),
+    }),
   health: () => request<Health>("/healthz"),
   session: () => request<Session>("/admin/v1/session"),
   models: async () => (await request<ListResponse<Model>>("/v1/models")).data,

@@ -1,0 +1,28 @@
+# KEDA may scale XScope CRs only in the managed local namespace. Do not grant
+# permission to mutate business resources or to run as XScope's Operator.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: xscope-keda-scale
+  namespace: xscope-system
+rules:
+  - apiGroups: [platform.xscope.io]
+    resources: [modeldeployments]
+    verbs: [get, list, watch]
+  - apiGroups: [platform.xscope.io]
+    resources: [modeldeployments/scale]
+    verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: xscope-keda-scale
+  namespace: xscope-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: xscope-keda-scale
+subjects:
+  - kind: ServiceAccount
+    name: keda-operator
+    namespace: keda

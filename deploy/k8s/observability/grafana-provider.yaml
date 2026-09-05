@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: xscope
+    orgId: 1
+    folder: XScope
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options: { path: /etc/grafana/xscope-dashboards }

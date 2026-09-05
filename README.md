@@ -1,5 +1,9 @@
 # XScope
 
+项目级灰度路由已接入：本地控制台 [流量路由](http://localhost:30081/#/routing) 支持请求头规则、Stable/Canary 权重和版本冲突保护。使用方式及当前 echo 模型限制见 [RoutePolicy 指南](docs/route-policy.md)。
+
+模型弹性采用 KEDA ScaledObject 单入口，Operator 不再直接生成 HPA；GPU/SLO 策略、资源池准入和安全缩容按阶段推进。当前实现范围、安装及验证见 [KEDA 接入](docs/keda-autoscaling.md)。
+
 XScope 是一个面向大模型 API 的云原生服务平台。源码按语言组织，每个语言目录都是可被 IDE 和原生工具直接识别的工作区；Bazel/Bzlmod 仍是整个 monorepo 的统一构建入口。
 
 ## 代码布局
@@ -122,7 +126,8 @@ Keycloak 管理员 `admin` / `xscope-local-keycloak-admin`，推理 API Key
 
 Rust 服务统一使用 `tracing`；本地 Kubernetes overlay 输出 JSON 日志。可通过 `RUST_LOG` 调整
 target 过滤规则，并通过 `XSCOPE_LOG_FORMAT=compact|json` 选择输出格式。
-已部署低资源的 Jaeger 与 Prometheus，提供 OTLP 追踪及逐 Pod 指标采集；查看方式、
+已部署低资源的 Jaeger、Prometheus 和 Grafana，三者使用独立 PVC 持久化，提供 OTLP
+追踪、逐 Pod 指标采集和预配置看板；查看方式、
 验证命令与尚未完成的边界见 [可观测性说明](docs/observability.md)。
 
 本地部署同时携带 `XSCOPE_CLUSTER_ID=docker-desktop` 与 `XSCOPE_REGION=local`。Operator
@@ -138,9 +143,9 @@ bazel run //rust/crates/operator
 ## 垂直切片进度
 
 1. 已完成：Rust/Axum/SeaORM 控制面、PostgreSQL 账号与租户成员、项目/API Key、模型目录和报价，以及 Ant Design 管理台。
-2. Rust 控制面经 kube-rs cluster-agent 创建/扩缩/删除 `ModelDeployment`；独立 Rust Operator 只负责 Kubernetes reconcile，业务控制面仍不持有 Kubernetes 凭证。
+2. Rust 控制面经 kube-rs cluster-agent 创建/版本化更新/扩缩/删除 `ModelDeployment`；独立 Rust Operator 管理 Runtime、HPA、PDB、InferencePool，并保留安装层 llm-d/EPP 所有权，业务控制面仍不持有 Kubernetes 凭证。配置、发布边界和验收命令见 [Operator 生命周期](docs/operator-lifecycle.md)。
 3. 已完成初版：Pingora 执行 Scope、模型、过期、月预算、余额门禁；Redis Lua 在所有网关副本间执行 RPM/TPM 预占与结算。
-4. 已完成初版：usage 持久化 WAL、至少一次上报、数据库幂等去重、精确费用、充值/支付/退款、双分录、发票记录和渠道对账。
+4. 已完成初版：usage 持久化 WAL、至少一次上报、数据库幂等去重、精确费用、手工充值/支付/退款记录、双分录、发票记录和渠道对账记录。新增 WAL checkpoint、Redis 配额幂等恢复，以及 [Gateway 资金预占/派发/结算与事务 Outbox](docs/billing-protocol.md)；未知用量保留冻结，正式供应商证据对账和真实支付/税务渠道仍待接入，见 [可靠性边界](docs/billing-recovery.md)。
 5. 按顺序推进：SSE/取消 → InferencePool/llm-d EPP → RoutePolicy/stable-canary → HPA/PDB/资源所有权 → 计费预占/WAL checkpoint/事件流 → 多集群 → 可观测性/审计 → 正式支付税务与更多推理 API。验收状态见 `docs/implementation-sequence.md`。
 
 ## 工程约定

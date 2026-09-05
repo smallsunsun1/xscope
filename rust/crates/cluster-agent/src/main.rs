@@ -17,7 +17,7 @@ use std::{sync::Arc, time::Duration};
 use subtle::ConstantTimeEq;
 use xscope_kubernetes::{
     Error,
-    api::{ModelDeployment, validate, validate_name},
+    api::{ModelDeployment, ModelDeploymentSpec, validate, validate_name},
 };
 
 #[derive(Clone)]
@@ -40,6 +40,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self.0 {
             Error::Invalid(message) => (400, "invalid_request", message),
+            Error::Conflict(message) => (409, "conflict", message),
             Error::Kube(kube::Error::Api(ref e)) if e.code == 404 => (
                 404,
                 "not_found",
@@ -73,7 +74,10 @@ fn router(app: App) -> Router {
     let secured = Router::new()
         .route("/v1/model-deployments", get(list).post(create))
         .route("/v1/model-deployments/{namespace}/{name}/scale", put(scale))
-        .route("/v1/model-deployments/{namespace}/{name}", delete(remove))
+        .route(
+            "/v1/model-deployments/{namespace}/{name}",
+            delete(remove).put(update),
+        )
         .route_layer(middleware::from_fn_with_state(app.clone(), authenticate));
     Router::new()
         .merge(secured)
@@ -191,6 +195,39 @@ async fn create(
 struct Scale {
     replicas: i32,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateDeployment {
+    resource_version: String,
+    spec: ModelDeploymentSpec,
+}
+
+async fn update(
+    State(app): State<App>,
+    Path((ns, name)): Path<(String, String)>,
+    body: Result<Json<UpdateDeployment>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<ModelDeployment>, ApiError> {
+    let Json(request) = body.map_err(|_| Error::Invalid("invalid JSON body".into()))?;
+    validate_name(&ns, true)?;
+    validate_name(&name, false)?;
+    let api: Api<ModelDeployment> = Api::namespaced(app.client, &ns);
+    let mut model = api.get(&name).await?;
+    if request.resource_version.is_empty()
+        || model.metadata.resource_version.as_deref() != Some(&request.resource_version)
+    {
+        return Err(Error::Conflict(
+            "resourceVersion changed; reload before updating deployment".into(),
+        )
+        .into());
+    }
+    // Preserve identity, labels, ownerReferences and status; accept spec only.
+    model.spec = request.spec;
+    validate(&mut model)?;
+    Ok(Json(
+        api.replace(&name, &PostParams::default(), &model).await?,
+    ))
+}
 async fn scale(
     State(app): State<App>,
     Path((ns, name)): Path<(String, String)>,
@@ -204,7 +241,13 @@ async fn scale(
     }
     let api: Api<ModelDeployment> = Api::namespaced(app.client, &ns);
     let mut model = api.get(&name).await?;
+    if model.spec.autoscaling.is_some() {
+        return Err(
+            Error::Invalid("disable autoscaling before manually scaling replicas".into()).into(),
+        );
+    }
     model.spec.replicas = request.replicas;
+    validate(&mut model)?;
     Ok(Json(
         api.replace(&name, &PostParams::default(), &model).await?,
     ))
@@ -357,6 +400,76 @@ mod tests {
             .await
             .status(),
             StatusCode::NO_CONTENT
+        );
+    }
+    #[tokio::test]
+    async fn deployment_update_requires_cas_and_releases_manual_scale_after_hpa_disabled() {
+        let app = app("test-token");
+        let mut initial = model();
+        initial["metadata"]["labels"] = json!({"project": "keep-me"});
+        initial["spec"]["resources"]["requests"] = json!({"cpu": "20m"});
+        initial["spec"]["autoscaling"] = json!({"minReplicas": 1, "maxReplicas": 3});
+        assert_eq!(
+            call(&app, "POST", "/v1/model-deployments", initial.clone())
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        let path = "/v1/model-deployments/xscope-system/demo";
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                &format!("{path}/scale"),
+                json!({"replicas": 0})
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        for version in ["", "stale"] {
+            assert_eq!(
+                call(
+                    &app,
+                    "PUT",
+                    path,
+                    json!({"resourceVersion": version, "spec": initial["spec"]})
+                )
+                .await
+                .status(),
+                StatusCode::CONFLICT
+            );
+        }
+        let mut disabled = initial["spec"].clone();
+        disabled.as_object_mut().unwrap().remove("autoscaling");
+        let response = call(
+            &app,
+            "PUT",
+            path,
+            json!({"resourceVersion": "1", "spec": disabled}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let updated: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap())
+                .unwrap();
+        assert_eq!(updated["metadata"]["uid"], "test-uid");
+        assert_eq!(updated["metadata"]["labels"]["project"], "keep-me");
+        assert!(
+            updated["spec"]
+                .get("autoscaling")
+                .is_none_or(|v| v.is_null())
+        );
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                &format!("{path}/scale"),
+                json!({"replicas": 0})
+            )
+            .await
+            .status(),
+            StatusCode::OK
         );
     }
     #[tokio::test]

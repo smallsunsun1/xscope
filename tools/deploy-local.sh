@@ -25,6 +25,9 @@ if [[ "${1:-}" == "--reset-business-data" ]]; then
   kubectl -n xscope-system rollout restart deployment/control-plane deployment/gateway
 fi
 
+# Preserve existing Grafana login/encryption keys across redeployments.
+kubectl create namespace xscope-system --dry-run=client -o yaml | kubectl apply -f -
+bazel run //tools:observability_admin
 kubectl apply -k "${repository_root}/deploy/k8s/overlays/local"
 if [[ "${1:-}" != "--reset-business-data" ]]; then
   kubectl -n xscope-system rollout restart deployment/control-plane deployment/gateway
@@ -34,6 +37,7 @@ kubectl -n xscope-system rollout status statefulset/postgres --timeout=180s
 kubectl -n xscope-system rollout status deployment/redis --timeout=180s
 kubectl -n xscope-system rollout status deployment/jaeger --timeout=180s
 kubectl -n xscope-system rollout status deployment/prometheus --timeout=180s
+kubectl -n xscope-system rollout status deployment/grafana --timeout=180s
 kubectl -n xscope-system rollout status deployment/keycloak --timeout=300s
 kubectl -n xscope-system rollout status deployment/control-plane --timeout=180s
 kubectl -n xscope-system rollout status deployment/cluster-agent --timeout=180s

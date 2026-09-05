@@ -18,7 +18,8 @@ spec:
         status: {}
         scale:
           specReplicasPath: .spec.replicas
-          statusReplicasPath: .status.readyReplicas
+          statusReplicasPath: .status.replicas
+          labelSelectorPath: .status.selector
       additionalPrinterColumns:
         - name: Model
           type: string
@@ -36,10 +37,22 @@ spec:
         openAPIV3Schema:
           type: object
           required: [spec]
+          x-kubernetes-validations:
+            - rule: "self.metadata.name.matches('^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$') && size(self.metadata.name) <= 63"
+              message: ModelDeployment name must be a Service DNS label, at most 63 characters.
           properties:
             spec:
               type: object
               required: [model, runtime, replicas, resources]
+              x-kubernetes-validations:
+                - rule: "!has(self.autoscaling) || (self.replicas >= self.autoscaling.minReplicas && self.replicas <= self.autoscaling.maxReplicas)"
+                  message: Autoscaled replicas must stay within minReplicas and maxReplicas; scale-to-zero is not enabled.
+                - rule: "!has(self.serving) || self.runtime.protocol == 'openai'"
+                  message: InferencePool serving currently requires the OpenAI runtime protocol.
+                - rule: "!has(self.autoscaling) || ((has(self.autoscaling.targetPendingRequests) || has(self.autoscaling.targetRunningRequests)) && !has(self.autoscaling.targetCpuUtilizationPercentage)) || (has(self.resources.requests) && 'cpu' in self.resources.requests)"
+                  message: CPU autoscaling requires resources.requests.cpu; Kubernetes validates workload quantities.
+                - rule: "!has(self.autoscaling) || (!has(self.autoscaling.targetPendingRequests) && !has(self.autoscaling.targetRunningRequests)) || has(self.serving)"
+                  message: EPP autoscaling requires a pool-specific serving entry.
               properties:
                 model:
                   type: object
@@ -69,13 +82,34 @@ spec:
                       additionalProperties: { type: string }
                     requests:
                       type: object
-                      additionalProperties: { type: string }
+                      maxProperties: 64
+                      additionalProperties: { type: string, maxLength: 64 }
                 autoscaling:
                   type: object
+                  required: [maxReplicas]
+                  x-kubernetes-validations:
+                    - rule: self.maxReplicas >= self.minReplicas
+                      message: maxReplicas must be at least minReplicas.
                   properties:
-                    minReplicas: { type: integer, minimum: 0 }
+                    minReplicas: { type: integer, minimum: 1, default: 1 }
                     maxReplicas: { type: integer, minimum: 1 }
                     targetPendingRequests: { type: integer, minimum: 1 }
+                    targetRunningRequests: { type: integer, minimum: 1 }
+                    targetCpuUtilizationPercentage: { type: integer, minimum: 1, maximum: 100 }
+                disruptionBudget:
+                  type: object
+                  required: [maxUnavailable]
+                  properties:
+                    maxUnavailable: { type: integer, minimum: 0 }
+                serving:
+                  type: object
+                  required: [endpointPickerService]
+                  properties:
+                    endpointPickerService:
+                      type: string
+                      maxLength: 63
+                      pattern: "^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$"
+                    endpointPickerPort: { type: integer, minimum: 1, maximum: 65535, default: 9002 }
                 rollout:
                   type: object
                   properties:
@@ -83,8 +117,8 @@ spec:
                       type: string
                       enum: [rolling]
                       default: rolling
-                      description: Canary and blue/green require the planned revision-routing API.
-                    canaryWeight: { type: integer, minimum: 0, maximum: 100 }
+                      description: Workload rollout only. Version traffic is managed by project RoutePolicy.
+                    canaryWeight: { type: integer, minimum: 0, maximum: 0, description: Deprecated; use RoutePolicy for traffic splitting. }
                 nodeSelector:
                   type: object
                   additionalProperties: { type: string }
@@ -97,6 +131,10 @@ spec:
               properties:
                 observedGeneration: { type: integer }
                 readyReplicas: { type: integer }
+                replicas: { type: integer }
+                selector: { type: string }
+                inferencePool: { type: string }
+                endpointPickerService: { type: string }
                 endpoint: { type: string }
                 clusterId: { type: string }
                 region: { type: string }

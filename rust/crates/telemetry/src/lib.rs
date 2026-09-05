@@ -160,6 +160,9 @@ impl RequestTrace {
             http.route = route,
             http.response.status_code = tracing::field::Empty,
             xscope.outcome = tracing::field::Empty,
+            xscope.route.pool = tracing::field::Empty,
+            xscope.route.revision = tracing::field::Empty,
+            xscope.model.revision = tracing::field::Empty,
             trace_id = tracing::field::Empty
         );
         let parent = TraceContextPropagator::new().extract(&Headers(headers));
@@ -184,6 +187,12 @@ impl RequestTrace {
             .span_context()
             .trace_id()
             .to_string()
+    }
+
+    pub fn selected_pool(&self, pool: &str, model_revision: &str, policy_revision: i64) {
+        self.span.record("xscope.route.pool", pool);
+        self.span.record("xscope.route.revision", policy_revision);
+        self.span.record("xscope.model.revision", model_revision);
     }
 
     /// Time to first nonempty upstream body byte, not necessarily first model token.
@@ -238,6 +247,7 @@ struct Metrics {
     first_byte: HistogramVec,
     pub events: IntCounterVec,
     tokens: IntCounterVec,
+    routes: IntCounterVec,
 }
 static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let registry = Registry::new();
@@ -285,6 +295,14 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         &["direction"],
     )
     .unwrap();
+    let routes = IntCounterVec::new(
+        Opts::new(
+            "xscope_route_selections_total",
+            "Pool selections before body admission; not completed requests",
+        ),
+        &["pool", "reason"],
+    )
+    .unwrap();
     for collector in [
         Box::new(requests.clone()) as Box<dyn prometheus::core::Collector>,
         Box::new(inflight.clone()),
@@ -292,6 +310,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         Box::new(first_byte.clone()),
         Box::new(events.clone()),
         Box::new(tokens.clone()),
+        Box::new(routes.clone()),
     ] {
         registry.register(collector).unwrap();
     }
@@ -303,6 +322,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         first_byte,
         events,
         tokens,
+        routes,
     }
 });
 
@@ -315,6 +335,11 @@ pub fn background_event(operation: &'static str, outcome: &'static str) {
 pub fn tokens(input: u64, output: u64) {
     METRICS.tokens.with_label_values(&["input"]).inc_by(input);
     METRICS.tokens.with_label_values(&["output"]).inc_by(output);
+}
+
+/// Only call with statically registered pool IDs and bounded reasons.
+pub fn route_selected(pool: &str, reason: &'static str) {
+    METRICS.routes.with_label_values(&[pool, reason]).inc();
 }
 pub fn metrics_text() -> String {
     let mut output = Vec::new();

@@ -10,11 +10,12 @@ client -> Pingora (key/model/quota, SSE, WAL)
                     InferencePool/demo-pool (Pod discovery)
 ```
 
-Pingora has one `XSCOPE_SERVING_ENTRY_JSON` with a pool ID, model and serving
-address. It does not discover or load-balance model Pods. Its remaining Pingora
-transport balancer covers DNS addresses of that single entry, not model replica
-selection. Legacy `XSCOPE_UPSTREAMS_JSON` is rejected to avoid silently retaining
-the old direct-Runtime deployment. Multi-model/stable/canary policy is stage 3.
+Pingora has a default `XSCOPE_SERVING_ENTRY_JSON` plus registered
+`XSCOPE_ADDITIONAL_SERVING_JSON` entries. Project RoutePolicy selects a stable or
+canary entry for the single public model. Transport balancing covers only a
+selected entry's DNS addresses, never model Pods. Legacy `XSCOPE_UPSTREAMS_JSON`
+is rejected. See [stage 3 routing and tests](route-policy.md); arbitrary multi-model
+routing and automatic Operator pool provisioning remain future work.
 
 ## Pinned upstreams and ownership
 
@@ -23,7 +24,7 @@ the old direct-Runtime deployment. Multi-model/stable/canary policy is stage 3.
   older `llm-d-inference-scheduler` name has been replaced by upstream.
 - EPP's InferenceObjective/InferenceModelRewrite schemas: llm-d-router v0.9.0,
   API group `llm-d.ai`. Installing these schemas does not implement XScope
-  RoutePolicy or canary rollout management.
+  RoutePolicy themselves; the project-level policy is implemented in Rust/SeaORM.
 - Envoy distroless v1.38.2, pinned by digest, standalone same-Pod EPP over TLS
   loopback. This follows upstream's self-signed local connection recipe; it is
   not a cross-node authenticated EPP transport configuration.

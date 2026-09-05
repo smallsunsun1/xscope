@@ -20,8 +20,13 @@ if [[ -d "${host_cargo_registry}" ]]; then
   docker_args+=(--mount "type=bind,src=${host_cargo_registry},dst=/host-cargo-registry,readonly")
 fi
 if [[ "${1:-}" == "images" ]]; then
-  docker "${docker_args[@]}" --entrypoint bash "xscope/bazel-toolchain:${target_arch}" tools/build-images-in-container.sh
-  for name in control-plane gateway cluster-agent operator runtime; do
+  shift
+  if [[ $# == 0 ]]; then set -- control-plane gateway cluster-agent operator runtime; fi
+  for name in "$@"; do
+    case "${name}" in control-plane|gateway|cluster-agent|operator|runtime) ;; *) echo "unknown image: ${name}" >&2; exit 1;; esac
+  done
+  docker "${docker_args[@]}" --entrypoint bash "xscope/bazel-toolchain:${target_arch}" tools/build-images-in-container.sh "$@"
+  for name in "$@"; do
     docker load --input "${repository_root}/.build/images/${name}_load.tar"
   done
   exit 0

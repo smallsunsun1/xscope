@@ -20,6 +20,7 @@ pub struct Config {
     pub bootstrap_admin_users: BTreeSet<String>,
     pub bootstrap_api_keys_json: String,
     pub component_targets: Vec<(String, String)>,
+    pub route_pools: Vec<xscope_domain::RoutePool>,
 }
 
 #[derive(Debug, Error)]
@@ -42,6 +43,14 @@ impl Config {
             .map(str::to_owned)
             .collect();
         Ok(Self {
+            route_pools: serde_json::from_str(&env_or(
+                "XSCOPE_ROUTE_POOLS_JSON",
+                r#"[{"id":"demo-pool","model":"xscope-demo","revision":"development"}]"#,
+            ))
+            .map_err(|error| ConfigError::Invalid {
+                name: "XSCOPE_ROUTE_POOLS_JSON",
+                message: error.to_string(),
+            })?,
             public_address: address("XSCOPE_CONTROL_ADDRESS", "0.0.0.0:8081")?,
             internal_address: address("XSCOPE_CONTROL_INTERNAL_ADDRESS", "0.0.0.0:8084")?,
             database_url,

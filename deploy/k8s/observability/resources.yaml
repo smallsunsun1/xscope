@@ -37,8 +37,8 @@ spec:
           args:
             - --config.file=/etc/prometheus/prometheus.yaml
             - --storage.tsdb.path=/prometheus
-            - --storage.tsdb.retention.time=24h
-            - --storage.tsdb.retention.size=256MB
+            - --storage.tsdb.retention.time=7d
+            - --storage.tsdb.retention.size=1GB
             - --query.max-concurrency=4
             - --query.timeout=15s
           env: [{ name: GOMAXPROCS, value: "1" }]
@@ -55,7 +55,7 @@ spec:
         - name: config
           configMap: { name: xscope-prometheus }
         - name: data
-          emptyDir: { sizeLimit: 512Mi }
+          persistentVolumeClaim: { claimName: prometheus-data }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -70,7 +70,7 @@ spec:
       labels: { app.kubernetes.io/name: jaeger, app.kubernetes.io/part-of: xscope }
     spec:
       automountServiceAccountToken: false
-      securityContext: { runAsNonRoot: true, runAsUser: 65532 }
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, fsGroup: 65532 }
       containers:
         - name: jaeger
           image: jaegertracing/jaeger:2.10.0@sha256:8c593d8048d86334eb52dba26633b6c846b8ecbe5c22905702c932ae97baeb42
@@ -87,9 +87,12 @@ spec:
             limits: { cpu: 300m, memory: 256Mi }
           volumeMounts:
             - { name: config, mountPath: /etc/jaeger, readOnly: true }
+            - { name: data, mountPath: /var/lib/jaeger }
       volumes:
         - name: config
           configMap: { name: xscope-jaeger }
+        - name: data
+          persistentVolumeClaim: { claimName: jaeger-data }
 ---
 apiVersion: v1
 kind: Service
@@ -116,7 +119,7 @@ spec:
     matchExpressions:
       - key: app.kubernetes.io/name
         operator: In
-        values: [gateway, control-plane, runtime, cluster-agent, operator, inference-serving]
+        values: [gateway, control-plane, runtime, runtime-canary, cluster-agent, operator, inference-serving, inference-serving-canary]
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -150,3 +153,7 @@ spec:
         - podSelector:
             matchLabels: { app.kubernetes.io/part-of: xscope }
       ports: [{ port: 4317, protocol: TCP }, { port: 4318, protocol: TCP }]
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: grafana }
+      ports: [{ port: 9090, protocol: TCP }, { port: 16686, protocol: TCP }]

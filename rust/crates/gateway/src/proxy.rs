@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use pingora_proxy::{ProxyHttp, Session};
 use serde::Deserialize;
 
 use crate::auth::{DynamicKeySet, Principal};
+use crate::billing::{BillingAdmission, Ticket};
 use crate::config::ServingConfig;
 use crate::quota::{QuotaDecision, QuotaDenial, QuotaManager, QuotaReservation};
 use crate::streaming::StreamMeter;
@@ -19,11 +21,17 @@ use crate::usage::{CompletionResponse, CompletionUsage, UsageRecord, UsageSink};
 const MAX_CAPTURE_BYTES: usize = 1 << 20;
 
 pub struct Gateway {
-    pub serving_transport: Arc<LoadBalancer<RoundRobin>>,
+    pub transports: HashMap<String, ServingTransport>,
     pub serving: ServingConfig,
     pub keys: Arc<DynamicKeySet>,
     pub quota: Arc<QuotaManager>,
     pub usage: UsageSink,
+    pub billing: Option<BillingAdmission>,
+}
+
+pub struct ServingTransport {
+    pub config: ServingConfig,
+    pub transport: Arc<LoadBalancer<RoundRobin>>,
 }
 
 pub struct RequestContext {
@@ -31,6 +39,8 @@ pub struct RequestContext {
     request_id: String,
     principal: Option<Principal>,
     endpoint_id: String,
+    model_revision: String,
+    policy_revision: i64,
     model_id: String,
     request_body: Vec<u8>,
     response_body: Vec<u8>,
@@ -42,6 +52,7 @@ pub struct RequestContext {
     response_status: u16,
     meterable: bool,
     quota_reservation: Option<QuotaReservation>,
+    billing_ticket: Option<Ticket>,
     usage_emitted: bool,
     telemetry: Option<xscope_telemetry::RequestTrace>,
 }
@@ -53,6 +64,8 @@ impl Default for RequestContext {
             request_id: String::new(),
             principal: None,
             endpoint_id: String::new(),
+            model_revision: String::new(),
+            policy_revision: 0,
             model_id: "unknown".into(),
             request_body: Vec::new(),
             response_body: Vec::new(),
@@ -64,6 +77,7 @@ impl Default for RequestContext {
             response_status: 0,
             meterable: false,
             quota_reservation: None,
+            billing_ticket: None,
             usage_emitted: false,
             telemetry: None,
         }
@@ -76,6 +90,7 @@ struct ModelRequest {
     messages: serde_json::Value,
     max_tokens: Option<u64>,
     max_completion_tokens: Option<u64>,
+    n: Option<u64>,
     #[serde(default)]
     stream: bool,
 }
@@ -117,18 +132,24 @@ impl ProxyHttp for Gateway {
                 return Ok(true);
             }
             ("GET", "/readyz") => {
-                let (status, body) = if self.keys.is_empty() {
+                let (status, body) = if !self.storage_healthy() {
+                    (
+                        503,
+                        serde_json::json!({"error":{"code":"not_ready","message":"usage WAL unavailable"}}),
+                    )
+                } else if self.keys.is_empty() {
                     (
                         503,
                         serde_json::json!({"error":{"code":"not_ready","message":"no API keys configured"}}),
                     )
-                } else if !self
-                    .serving_transport
-                    .backends()
-                    .get_backend()
-                    .iter()
-                    .any(|backend| self.serving_transport.backends().ready(backend))
-                {
+                } else if !self.transports.get(&self.serving.id).is_some_and(|entry| {
+                    entry
+                        .transport
+                        .backends()
+                        .get_backend()
+                        .iter()
+                        .any(|backend| entry.transport.backends().ready(backend))
+                }) {
                     (
                         503,
                         serde_json::json!({"error":{"code":"not_ready","message":"no healthy serving endpoint"}}),
@@ -165,6 +186,10 @@ impl ProxyHttp for Gateway {
             }
         }
 
+        if !self.storage_healthy() {
+            respond_json(session, 503, serde_json::json!({"error":{"code":"usage_storage_unavailable","message":"usage storage needs operator attention"}}), &ctx.request_id).await?;
+            return Ok(true);
+        }
         let authorization = session
             .req_header()
             .headers
@@ -200,6 +225,32 @@ impl ProxyHttp for Gateway {
             }), &ctx.request_id).await?;
             return Ok(true);
         }
+        // This gateway currently exposes one public model. Select its version
+        // before Pingora connects upstream; body admission below still verifies
+        // the submitted model and holds all prompt bytes until authorization.
+        let (pool_id, reason) = if let Some(policy) = principal.route_policy(&self.serving.model) {
+            ctx.policy_revision = policy.revision;
+            let roll = ((uuid::Uuid::now_v7().as_u128() & u128::from(u64::MAX)) % 100) as u8;
+            policy.spec.select(
+                |rule| header_matches(&session.req_header().headers, rule),
+                roll,
+            )
+        } else {
+            (self.serving.id.as_str(), "default")
+        };
+        let Some(pool) = self.transports.get(pool_id) else {
+            respond_json(session, 503, serde_json::json!({"error":{"code":"route_pool_unavailable","message":"selected pool is not configured on this gateway"}}), &ctx.request_id).await?;
+            return Ok(true);
+        };
+        ctx.endpoint_id = pool_id.to_owned();
+        ctx.model_revision.clone_from(&pool.config.revision);
+        xscope_telemetry::route_selected(pool_id, reason);
+        if let Some(trace) = &ctx.telemetry {
+            trace.selected_pool(pool_id, &ctx.model_revision, ctx.policy_revision);
+        }
+        tracing::info!(parent: ctx.telemetry.as_ref().and_then(|trace| trace.span.id()),
+            request_id = %ctx.request_id, pool = pool_id, policy_revision = ctx.policy_revision,
+            model_revision = %ctx.model_revision, reason, "model pool selected");
         ctx.principal = Some(principal);
         Ok(false)
     }
@@ -244,6 +295,27 @@ impl ProxyHttp for Gateway {
                 ));
             }
             ctx.stream_requested = request.stream;
+            let limits = if let Some(billing) = &self.billing {
+                let limits = money_token_limits(&request, billing.context_tokens)?;
+                // Enforce a finite completion bound at the provider as well as
+                // in the financial contract. Never trust a tokenizer estimate
+                // as the monetary input ceiling: reserve the remaining context.
+                let mut value: serde_json::Value = serde_json::from_slice(&ctx.request_body)
+                    .expect("already decoded ModelRequest");
+                let object = value.as_object_mut().expect("ModelRequest object");
+                object.remove("max_tokens");
+                object.remove("max_completion_tokens");
+                let name = if request.max_completion_tokens.is_some() {
+                    "max_completion_tokens"
+                } else {
+                    "max_tokens"
+                };
+                object.insert(name.into(), limits.1.into());
+                ctx.request_body = serde_json::to_vec(&value).expect("JSON value");
+                Some(limits)
+            } else {
+                None
+            };
             if request.stream {
                 let mut value: serde_json::Value = serde_json::from_slice(&ctx.request_body)
                     .map_err(|error| {
@@ -298,6 +370,44 @@ impl ProxyHttp for Gateway {
                     ));
                 }
             }
+            if let (Some(billing), Some((input_token_limit, output_token_limit))) =
+                (&self.billing, limits)
+            {
+                let mut trace_headers = http::HeaderMap::new();
+                if let Some(trace) = &ctx.telemetry {
+                    xscope_telemetry::inject(&trace.span, &mut trace_headers);
+                }
+                // Client X-Request-Id is correlation, never financial idempotency.
+                let id = format!("req-{}", uuid::Uuid::now_v7());
+                let reservation = xscope_domain::billing::ReserveRequest {
+                    id: id.clone(),
+                    request_id: id,
+                    tenant_id: principal.tenant_id.clone(),
+                    project_id: principal.project_id.clone(),
+                    api_key_id: principal.api_key_id.clone(),
+                    model_id: request.model.clone(),
+                    model_revision: ctx.model_revision.clone(),
+                    price_version: billing.price_version.clone(),
+                    input_token_limit,
+                    output_token_limit,
+                };
+                ctx.billing_ticket = Some(
+                    billing
+                        .admit(reservation, trace_headers)
+                        .await
+                        .map_err(|status| {
+                            let public_status = if matches!(status, 400 | 402 | 403 | 422) {
+                                status
+                            } else {
+                                503
+                            };
+                            Error::explain(
+                                ErrorType::HTTPStatus(public_status),
+                                "financial admission rejected or unavailable",
+                            )
+                        })?,
+                );
+            }
             ctx.model_id = request.model;
             ctx.meterable = true;
             *body = Some(Bytes::from(std::mem::take(&mut ctx.request_body)));
@@ -310,14 +420,19 @@ impl ProxyHttp for Gateway {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let backend = self
-            .serving_transport
+        let entry = self.transports.get(&ctx.endpoint_id).ok_or_else(|| {
+            Error::explain(
+                ErrorType::HTTPStatus(503),
+                "selected serving pool is unavailable",
+            )
+        })?;
+        let backend = entry
+            .transport
             .select(ctx.request_id.as_bytes(), 256)
             .ok_or_else(|| {
                 Error::explain(ErrorType::HTTPStatus(503), "no healthy serving entry")
             })?;
-        ctx.endpoint_id.clone_from(&self.serving.id);
-        let mut peer = HttpPeer::new(backend, self.serving.tls, self.serving.server_name.clone());
+        let mut peer = HttpPeer::new(backend, entry.config.tls, entry.config.server_name.clone());
         // A stale service address must not leave admission requests hanging on
         // the OS TCP timeout. These are connection/idle limits, not an SSE
         // total-duration deadline.
@@ -378,6 +493,12 @@ impl ProxyHttp for Gateway {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         ctx.response_status = response.status.as_u16();
+        if let Some(ticket) = &ctx.billing_ticket {
+            response.insert_header("x-xscope-billing-request-id", &ticket.id)?;
+        }
+        response.insert_header("x-xscope-pool", &ctx.endpoint_id)?;
+        response.insert_header("x-xscope-model-revision", &ctx.model_revision)?;
+        response.insert_header("x-xscope-route-revision", ctx.policy_revision.to_string())?;
         if let Some(trace) = &ctx.telemetry {
             response.insert_header("x-trace-id", trace.trace_id())?;
         }
@@ -489,6 +610,14 @@ impl ProxyHttp for Gateway {
     }
 }
 
+fn header_matches(headers: &http::HeaderMap, rule: &xscope_domain::routing::HeaderRoute) -> bool {
+    let mut values = headers.get_all(&rule.name).iter();
+    values
+        .next()
+        .is_some_and(|value| value.as_bytes() == rule.value.as_bytes())
+        && values.next().is_none()
+}
+
 fn strip_serving_control_headers(request: &mut RequestHeader) {
     // Envoy ORIGINAL_DST trusts EPP's destination header. None of the client's
     // routing, retry or timeout controls may cross this trust boundary.
@@ -501,6 +630,8 @@ fn strip_serving_control_headers(request: &mut RequestHeader) {
                 || name.starts_with("x-gateway-")
                 || name.starts_with("x-inference-")
                 || name.starts_with("x-ai-eg-")
+                || name.starts_with("x-xscope-")
+                || name.starts_with("x-route-")
         })
         .cloned()
         .collect();
@@ -527,7 +658,35 @@ fn estimate_reserved_tokens(request: &ModelRequest) -> u64 {
         .min(10_000_000_001)
 }
 
+fn money_token_limits(request: &ModelRequest, context: i64) -> Result<(i64, i64)> {
+    let output = request
+        .max_completion_tokens
+        .or(request.max_tokens)
+        .unwrap_or(1024);
+    if request.max_completion_tokens.is_some() && request.max_tokens.is_some()
+        || request.n.is_some_and(|n| n != 1)
+        || output == 0
+        || output >= context as u64
+        || estimate_reserved_tokens(request) > context as u64
+    {
+        return Err(Error::explain(
+            ErrorType::HTTPStatus(400),
+            "ambiguous or excessive model token bounds",
+        ));
+    }
+    let output = i64::try_from(output).expect("bounded by positive i64 context");
+    Ok((context - output, output))
+}
+
 impl Gateway {
+    fn storage_healthy(&self) -> bool {
+        self.usage.is_healthy()
+            && self
+                .billing
+                .as_ref()
+                .is_none_or(BillingAdmission::is_healthy)
+    }
+
     fn emit_usage(&self, ctx: &mut RequestContext, error: Option<&Error>) -> Result<()> {
         if !ctx.meterable {
             return Ok(());
@@ -547,6 +706,7 @@ impl Gateway {
                 principal,
                 endpoint_id: &ctx.endpoint_id,
                 model_id: &ctx.model_id,
+                model_revision: &ctx.model_revision,
                 input_tokens,
                 output_tokens,
                 latency_ms: ctx
@@ -556,6 +716,8 @@ impl Gateway {
                     .try_into()
                     .unwrap_or(u64::MAX),
                 status,
+                billing: ctx.billing_ticket.as_ref(),
+                usage_known: ctx.actual_usage().is_some(),
             })
             .map_err(|cause| {
                 Error::because(ErrorType::InternalError, "usage WAL write failed", cause)
@@ -598,7 +760,7 @@ impl RequestContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{RequestContext, strip_serving_control_headers};
+    use super::{RequestContext, header_matches, strip_serving_control_headers};
     use pingora_http::RequestHeader;
 
     #[test]
@@ -611,6 +773,8 @@ mod tests {
             "x-inference-objective",
             "authorization",
             "accept-encoding",
+            "x-route-cohort",
+            "x-xscope-pool",
         ] {
             request.insert_header(name, "untrusted").unwrap();
         }
@@ -620,6 +784,22 @@ mod tests {
         assert_eq!(request.headers.len(), 2);
         assert_eq!(request.headers["x-canary"], "preview");
         assert_eq!(request.headers["x-request-id"], "trace-id");
+    }
+
+    #[test]
+    fn cohort_names_are_case_insensitive_but_values_are_exact_and_unambiguous() {
+        let rule = xscope_domain::routing::HeaderRoute {
+            name: "x-route-cohort".into(),
+            value: "qa".into(),
+            target: xscope_domain::routing::RouteTarget::Canary,
+        };
+        let mut headers = http::HeaderMap::new();
+        headers.insert("X-Route-Cohort", http::HeaderValue::from_static("qa"));
+        assert!(header_matches(&headers, &rule));
+        headers.append("x-route-cohort", http::HeaderValue::from_static("qa"));
+        assert!(!header_matches(&headers, &rule));
+        headers.insert("x-route-cohort", http::HeaderValue::from_static("QA"));
+        assert!(!header_matches(&headers, &rule));
     }
 
     #[test]

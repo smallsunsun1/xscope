@@ -26,6 +26,7 @@ const DeploymentsPage = lazy(() => import("./pages/DeploymentsPage").then((modul
 const ModelsPage = lazy(() => import("./pages/ModelsPage").then((module) => ({ default: module.ModelsPage })));
 const ProjectsPage = lazy(() => import("./pages/ProjectsPage").then((module) => ({ default: module.ProjectsPage })));
 const UsersPage = lazy(() => import("./pages/UsersPage").then((module) => ({ default: module.UsersPage })));
+const RoutingPage = lazy(() => import("./pages/RoutingPage").then((module) => ({ default: module.RoutingPage })));
 
 const { Content, Sider } = Layout;
 
@@ -35,6 +36,7 @@ const pageNames = {
   keys: "API Keys",
   models: "模型与价格",
   deployments: "模型部署",
+  routing: "流量路由",
   billing: "用量与计费",
   users: "用户与成员",
 } as const;
@@ -48,6 +50,7 @@ const menuItems: MenuProps["items"] = [
     { key: "keys", icon: <KeyRound size={18} />, label: "API Keys" },
     { key: "models", icon: <Layers3 size={18} />, label: "模型与价格" },
     { key: "deployments", icon: <Boxes size={18} />, label: "模型部署" },
+    { key: "routing", icon: <Layers3 size={18} />, label: "流量路由" },
   ] },
   { type: "group", label: "平台运营", children: [
     { key: "users", icon: <UsersRound size={18} />, label: "用户与成员" },
@@ -125,6 +128,7 @@ export function ConsoleApp() {
     keys: <APIKeysPage />,
     models: <ModelsPage />,
     deployments: <DeploymentsPage />,
+    routing: <RoutingPage />,
     billing: <BillingPage />,
     users: <UsersPage />,
   }[page];

@@ -13,3 +13,4 @@ __pycache__/
 /rust-project.json
 /.rules_rust_analyzer/
 /.vscode/.rules_rust_analyzer/
+xscope.code-workspace

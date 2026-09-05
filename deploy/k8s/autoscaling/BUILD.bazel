@@ -1,0 +1,8 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["rbac.yaml"])
+
+filegroup(
+    name = "upstream",
+    srcs = ["@keda_manifest//file"],
+)

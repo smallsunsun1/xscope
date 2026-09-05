@@ -4,6 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod billing;
+pub mod routing;
+pub use routing::{PutRoutePolicy, RoutePolicy, RoutePolicySpec, RoutePool};
+
 pub const DEFAULT_MODEL_ID: &str = "xscope-demo";
 pub const DEFAULT_PRICE_VERSION: &str = "2026-09-01";
 pub const MICROS_PER_MINOR_UNIT: i64 = 1_000_000;
@@ -118,6 +122,7 @@ pub struct Quote {
 pub struct GatewaySnapshot {
     pub generated_at: DateTime<Utc>,
     pub keys: Vec<GatewayKey>,
+    pub route_policies: Vec<RoutePolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -12,10 +12,13 @@ pub struct Settings {
     pub usage_wal: String,
     pub api_keys: Vec<ApiKeyConfig>,
     pub serving: ServingConfig,
+    pub additional_serving: Vec<ServingConfig>,
     pub control_internal_url: String,
     pub internal_token: String,
     pub policy_refresh_seconds: u64,
     pub redis_url: String,
+    pub billing_reservations: bool,
+    pub model_context_tokens: i64,
 }
 
 #[derive(Clone, Deserialize)]
@@ -45,6 +48,8 @@ pub struct ServingConfig {
     pub model: String,
     pub address: String,
     #[serde(default)]
+    pub revision: String,
+    #[serde(default)]
     pub tls: bool,
     #[serde(default)]
     pub server_name: String,
@@ -52,6 +57,10 @@ pub struct ServingConfig {
 
 #[derive(Debug, Error)]
 pub enum SettingsError {
+    #[error(
+        "billing reservations require an internal URL/token and a positive model context; XSCOPE_BILLING_RESERVATIONS must be true or false"
+    )]
+    InvalidBilling,
     #[error("{name} contains invalid JSON: {source}")]
     Json {
         name: &'static str,
@@ -63,6 +72,8 @@ pub enum SettingsError {
     LegacyUpstreams,
     #[error("serving entry id, model and address must be nonempty")]
     InvalidServingEntry,
+    #[error("serving pool IDs must be unique and all pools must serve the configured public model")]
+    InvalidServingPools,
 }
 
 impl Settings {
@@ -76,21 +87,54 @@ impl Settings {
         if env::var_os("XSCOPE_UPSTREAMS_JSON").is_some() {
             return Err(SettingsError::LegacyUpstreams);
         }
-        let serving: ServingConfig = parse_json_env(
+        let mut serving: ServingConfig = parse_json_env(
             "XSCOPE_SERVING_ENTRY_JSON",
             r#"{"id":"demo-pool","model":"xscope-demo","address":"127.0.0.1:8085"}"#,
         )?;
+        let model_revision = env_or("XSCOPE_MODEL_REVISION", "development");
+        if serving.revision.is_empty() {
+            serving.revision.clone_from(&model_revision);
+        }
         serving.validate()?;
+        let additional_serving: Vec<ServingConfig> =
+            parse_json_env("XSCOPE_ADDITIONAL_SERVING_JSON", "[]")?;
+        let mut ids = std::collections::HashSet::from([serving.id.clone()]);
+        for pool in &additional_serving {
+            pool.validate()?;
+            if pool.model != serving.model
+                || pool.revision.trim().is_empty()
+                || !ids.insert(pool.id.clone())
+            {
+                return Err(SettingsError::InvalidServingPools);
+            }
+        }
+        let control_internal_url = env_or("XSCOPE_CONTROL_INTERNAL_URL", "");
+        let internal_token = env_or("XSCOPE_INTERNAL_TOKEN", "");
+        let billing_reservations = env_or("XSCOPE_BILLING_RESERVATIONS", "false")
+            .parse::<bool>()
+            .map_err(|_| SettingsError::InvalidBilling)?;
+        let model_context_tokens = env_or("XSCOPE_MODEL_CONTEXT_TOKENS", "32768")
+            .parse::<i64>()
+            .map_err(|_| SettingsError::InvalidBilling)?;
+        if model_context_tokens <= 0
+            || (billing_reservations
+                && (control_internal_url.is_empty() || internal_token.is_empty()))
+        {
+            return Err(SettingsError::InvalidBilling);
+        }
         Ok(Self {
             listen: env_or("XSCOPE_GATEWAY_ADDRESS", "0.0.0.0:8080"),
             region: env_or("XSCOPE_REGION", "local"),
-            model_revision: env_or("XSCOPE_MODEL_REVISION", "development"),
+            model_revision,
             price_version: env_or("XSCOPE_PRICE_VERSION", "2026-09-01"),
             usage_wal: env_or("XSCOPE_USAGE_WAL", "/tmp/xscope-usage-v1.jsonl"),
             api_keys,
             serving,
-            control_internal_url: env_or("XSCOPE_CONTROL_INTERNAL_URL", ""),
-            internal_token: env_or("XSCOPE_INTERNAL_TOKEN", ""),
+            additional_serving,
+            control_internal_url,
+            internal_token,
+            billing_reservations,
+            model_context_tokens,
             policy_refresh_seconds: env_or("XSCOPE_POLICY_REFRESH_SECONDS", "5")
                 .parse()
                 .unwrap_or(5)
@@ -117,6 +161,9 @@ impl ServingConfig {
         if [&self.id, &self.model, &self.address]
             .iter()
             .any(|value| value.trim().is_empty())
+            || [&self.id, &self.revision]
+                .iter()
+                .any(|value| value.len() > 128 || http::HeaderValue::from_str(value).is_err())
         {
             return Err(SettingsError::InvalidServingEntry);
         }

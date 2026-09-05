@@ -95,6 +95,12 @@ pub fn public_router(state: &AppState) -> Router {
         )
         .route("/components/{name}/health", get(component_health))
         .route("/projects", get(list_projects).post(create_project))
+        .route("/route-pools", get(list_route_pools))
+        .route("/route-policies", get(list_route_policies))
+        .route(
+            "/projects/{project_id}/models/{model}/route-policy",
+            put(put_route_policy),
+        )
         .route("/api-keys", get(list_api_keys).post(create_api_key))
         .route("/api-keys/{id}", delete(revoke_api_key))
         .route("/quote", get(quote))
@@ -117,7 +123,7 @@ pub fn public_router(state: &AppState) -> Router {
         )
         .route(
             "/model-deployments/{namespace}/{name}",
-            delete(cluster_proxy),
+            delete(cluster_proxy).put(cluster_proxy),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -150,9 +156,103 @@ pub fn internal_router(state: AppState) -> Router {
     Router::new()
         .route("/internal/v1/gateway/snapshot", get(gateway_snapshot))
         .route("/internal/v1/usage-events", post(record_usage))
+        .route("/internal/v1/billing/reservations", post(reserve_money))
+        .route(
+            "/internal/v1/billing/projects/{project}/reservations/{id}",
+            get(money_reservation),
+        )
+        .route(
+            "/internal/v1/billing/projects/{project}/reservations/{id}/dispatch",
+            post(dispatch_money),
+        )
+        .route(
+            "/internal/v1/billing/projects/{project}/reservations/{id}/release",
+            post(release_money),
+        )
+        .route(
+            "/internal/v1/billing/projects/{project}/reservations/{id}/settle",
+            post(settle_money),
+        )
+        .route(
+            "/internal/v1/billing/projects/{project}/consumers/{consumer}/poll",
+            post(poll_billing_events),
+        )
+        .route(
+            "/internal/v1/billing/projects/{project}/consumers/{consumer}/ack",
+            post(ack_billing_events),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), internal_auth))
         .with_state(state)
         .layer(middleware::from_fn(observe_http))
+}
+
+async fn reserve_money(
+    State(state): State<AppState>,
+    Json(request): Json<crate::billing::ReserveRequest>,
+) -> ServiceResult<Json<xscope_entities::billing_reservation::Model>> {
+    Ok(Json(state.repository.reserve_money(request).await?))
+}
+async fn money_reservation(
+    State(state): State<AppState>,
+    Path((project, id)): Path<(String, String)>,
+) -> ServiceResult<Json<xscope_entities::billing_reservation::Model>> {
+    Ok(Json(
+        state.repository.money_reservation(&project, &id).await?,
+    ))
+}
+async fn dispatch_money(
+    State(state): State<AppState>,
+    Path((project, id)): Path<(String, String)>,
+) -> ServiceResult<Json<xscope_entities::billing_reservation::Model>> {
+    Ok(Json(state.repository.dispatch_money(&project, &id).await?))
+}
+async fn release_money(
+    State(state): State<AppState>,
+    Path((project, id)): Path<(String, String)>,
+    Json(request): Json<crate::billing::ReleaseRequest>,
+) -> ServiceResult<Json<xscope_entities::billing_reservation::Model>> {
+    Ok(Json(
+        state
+            .repository
+            .release_money(&project, &id, request)
+            .await?,
+    ))
+}
+async fn settle_money(
+    State(state): State<AppState>,
+    Path((project, id)): Path<(String, String)>,
+    Json(request): Json<crate::billing::SettleRequest>,
+) -> ServiceResult<Json<xscope_entities::billing_reservation::Model>> {
+    Ok(Json(
+        state
+            .repository
+            .settle_money(&project, &id, request)
+            .await?,
+    ))
+}
+async fn poll_billing_events(
+    State(state): State<AppState>,
+    Path((project, consumer)): Path<(String, String)>,
+    Json(request): Json<crate::billing::PollRequest>,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        state
+            .repository
+            .poll_billing_events(&project, &consumer, request)
+            .await?,
+    ))
+}
+async fn ack_billing_events(
+    State(state): State<AppState>,
+    Path((project, consumer)): Path<(String, String)>,
+    Json(request): Json<crate::billing::AckRequest>,
+) -> ServiceResult<Json<xscope_entities::billing_consumer::Model>> {
+    Ok(Json(
+        state
+            .repository
+            .ack_billing_events(&project, &consumer, request)
+            .await?,
+    ))
 }
 
 async fn observe_http(
@@ -265,6 +365,48 @@ async fn create_project(
     require_tenant(&context, &project.tenant_id)?;
     let project = state.repository.create_project(project).await?;
     Ok((StatusCode::CREATED, Json(project)))
+}
+
+async fn list_route_pools(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({"object": "list", "data": state.config.route_pools}))
+}
+
+async fn list_route_policies(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+) -> ServiceResult<Json<Value>> {
+    let policies: Vec<_> = state
+        .repository
+        .list_route_policies()
+        .await?
+        .into_iter()
+        .filter(|policy| context.can_access(&policy.tenant_id))
+        .collect();
+    Ok(Json(json!({"object": "list", "data": policies})))
+}
+
+async fn put_route_policy(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path((project_id, model)): Path<(String, String)>,
+    Json(request): Json<xscope_domain::PutRoutePolicy>,
+) -> ServiceResult<Json<xscope_domain::RoutePolicy>> {
+    let project = state.repository.get_project(&project_id).await?;
+    if !context.can_manage(&project.tenant_id) {
+        return Err(ServiceError::Forbidden);
+    }
+    let policy = state
+        .repository
+        .put_route_policy(&project, &model, request, &state.config.route_pools)
+        .await?;
+    tracing::info!(
+        project_id,
+        model,
+        revision = policy.revision,
+        user_id = context.user.id,
+        "route policy updated"
+    );
+    Ok(Json(policy))
 }
 
 async fn list_api_keys(

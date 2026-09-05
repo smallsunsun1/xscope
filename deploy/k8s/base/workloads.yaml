@@ -78,6 +78,9 @@ metadata:
   namespace: xscope-system
 spec:
   replicas: 1
+  # This local single-replica deployment has one WAL/PVC and one writer.
+  # Multi-replica installations require per-replica storage (not a shared file).
+  strategy: { type: Recreate }
   selector:
     matchLabels: { app.kubernetes.io/name: gateway }
   template:
@@ -97,6 +100,10 @@ spec:
                   name: xscope-gateway-keys
                   key: keys.json
                   optional: true
+            - name: XSCOPE_BILLING_RESERVATIONS
+              value: "true"
+            - name: XSCOPE_MODEL_CONTEXT_TOKENS
+              value: "32768"
             - name: XSCOPE_INTERNAL_TOKEN
               valueFrom:
                 secretKeyRef: { name: xscope-platform-secrets, key: internal-token }

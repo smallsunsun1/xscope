@@ -1,4 +1,4 @@
-# Jaeger v2 embeds the OpenTelemetry Collector. Local traces are intentionally ephemeral.
+# Embedded Badger persists traces without another database service (single replica only).
 service:
   extensions: [jaeger_storage, jaeger_query]
   pipelines:
@@ -15,7 +15,13 @@ extensions:
   jaeger_storage:
     backends:
       local:
-        memory: { max_traces: 1000 }
+        badger:
+          directories:
+            keys: /var/lib/jaeger/keys
+            values: /var/lib/jaeger/values
+          ephemeral: false
+          consistency: true
+          ttl: { spans: 72h }
 receivers:
   otlp:
     protocols:

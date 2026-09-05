@@ -3,8 +3,12 @@ kind: Kustomization
 resources:
   - ../../crds
   - ../../base
+  - ../../canary
+  - runtime-canary.yaml
   - secrets.yaml
 patches:
+  - path: grafana-service.yaml
+  - path: grafana-ingress.yaml
   - target:
       kind: ConfigMap
       name: xscope-config
@@ -12,6 +16,12 @@ patches:
       - op: replace
         path: /data/XSCOPE_AUTO_JOIN_DEFAULT_TENANT
         value: "true"
+      - op: add
+        path: /data/XSCOPE_ADDITIONAL_SERVING_JSON
+        value: '[{"id":"demo-pool-canary","model":"xscope-demo","revision":"canary-echo-v1","address":"inference-serving-canary:8085"}]'
+      - op: add
+        path: /data/XSCOPE_ROUTE_POOLS_JSON
+        value: '[{"id":"demo-pool","model":"xscope-demo","revision":"development"},{"id":"demo-pool-canary","model":"xscope-demo","revision":"canary-echo-v1"}]'
   - target:
       kind: Service
       name: keycloak

@@ -14,6 +14,8 @@ pub enum ServiceError {
     NotFound,
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    InsufficientFunds(String),
     #[error("authentication is required")]
     Unauthorized,
     #[error("access is forbidden")]
@@ -46,6 +48,11 @@ impl IntoResponse for ServiceError {
                 "resource not found".to_owned(),
             ),
             Self::Conflict(message) => (StatusCode::CONFLICT, "conflict", message.clone()),
+            Self::InsufficientFunds(message) => (
+                StatusCode::PAYMENT_REQUIRED,
+                "billing_limit_exceeded",
+                message.clone(),
+            ),
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 "authentication_required",

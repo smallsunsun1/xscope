@@ -1,0 +1,25 @@
+# No ownerReferences: removing/replacing a Deployment must not delete its data.
+# Uses the cluster default StorageClass; local Docker Desktop provides hostpath.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: prometheus-data, namespace: xscope-system }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: { storage: 2Gi }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: jaeger-data, namespace: xscope-system }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: { storage: 2Gi }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: grafana-data, namespace: xscope-system }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: { storage: 1Gi }

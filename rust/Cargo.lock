@@ -5786,6 +5786,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "xscope-domain",
  "xscope-telemetry",
 ]
 

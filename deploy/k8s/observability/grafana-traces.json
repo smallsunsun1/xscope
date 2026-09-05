@@ -1,0 +1,343 @@
+{
+  "uid": "xscope-traces",
+  "title": "XScope 请求追踪",
+  "description": "搜索已采集的调用链，点击 Trace ID 打开详情。列表是最多 100 条采样结果，不代替 Prometheus 请求计数。",
+  "schemaVersion": 39,
+  "version": 2,
+  "editable": false,
+  "tags": [
+    "xscope",
+    "tracing"
+  ],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "服务",
+        "type": "custom",
+        "query": "xscope-gateway,xscope-envoy,xscope-epp,xscope-runtime,xscope-control-plane,xscope-cluster-agent,xscope-operator",
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "current": {
+          "text": "xscope-gateway",
+          "value": "xscope-gateway"
+        },
+        "options": [
+          {
+            "text": "xscope-gateway",
+            "value": "xscope-gateway",
+            "selected": true
+          },
+          {
+            "text": "xscope-envoy",
+            "value": "xscope-envoy",
+            "selected": false
+          },
+          {
+            "text": "xscope-epp",
+            "value": "xscope-epp",
+            "selected": false
+          },
+          {
+            "text": "xscope-runtime",
+            "value": "xscope-runtime",
+            "selected": false
+          },
+          {
+            "text": "xscope-control-plane",
+            "value": "xscope-control-plane",
+            "selected": false
+          },
+          {
+            "text": "xscope-cluster-agent",
+            "value": "xscope-cluster-agent",
+            "selected": false
+          },
+          {
+            "text": "xscope-operator",
+            "value": "xscope-operator",
+            "selected": false
+          }
+        ]
+      },
+      {
+        "name": "min_duration",
+        "label": "最小耗时",
+        "type": "custom",
+        "query": "0ms,100ms,500ms,1s,5s",
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "current": {
+          "text": "0ms",
+          "value": "0ms"
+        },
+        "options": [
+          {
+            "text": "0ms",
+            "value": "0ms",
+            "selected": true
+          },
+          {
+            "text": "100ms",
+            "value": "100ms",
+            "selected": false
+          },
+          {
+            "text": "500ms",
+            "value": "500ms",
+            "selected": false
+          },
+          {
+            "text": "1s",
+            "value": "1s",
+            "selected": false
+          },
+          {
+            "text": "5s",
+            "value": "5s",
+            "selected": false
+          }
+        ]
+      },
+      {
+        "name": "operation",
+        "label": "操作名",
+        "description": "留空查询全部操作；也可填写准确 span 名，如 http.request。",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "options": [
+          {
+            "text": "",
+            "value": "",
+            "selected": true
+          }
+        ],
+        "hide": 0
+      },
+      {
+        "name": "tags",
+        "label": "标签",
+        "description": "Jaeger logfmt 标签，例如 http.route=\"/v1/chat/completions\"。",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "options": [
+          {
+            "text": "",
+            "value": "",
+            "selected": true
+          }
+        ],
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "",
+      "type": "text",
+      "transparent": true,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### XSCOPE / 请求追踪\n筛选请求，点击 **Trace ID** 查看完整调用链。按所选时间窗口 · 30 秒刷新 · 每次最多 100 条。"
+      }
+    },
+    {
+      "id": 2,
+      "title": "调用链列表",
+      "type": "table",
+      "datasource": {
+        "type": "jaeger",
+        "uid": "xscope-jaeger"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 24,
+        "h": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "jaeger",
+            "uid": "xscope-jaeger"
+          },
+          "queryType": "search",
+          "service": "$service",
+          "operation": "$operation",
+          "tags": "$tags",
+          "minDuration": "$min_duration",
+          "limit": 100
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "md",
+        "sortBy": [
+          {
+            "displayName": "开始时间",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false,
+          "reducer": [
+            "count"
+          ],
+          "countRows": false,
+          "fields": ""
+        },
+        "enablePagination": true,
+        "frozenColumns": {
+          "left": 1
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true,
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false,
+            "minWidth": 120
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "traceID"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Trace ID ↗"
+              },
+              {
+                "id": "custom.width",
+                "value": 300
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "traceName"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "服务 / 操作"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "startTime"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "开始时间"
+              },
+              {
+                "id": "custom.width",
+                "value": 190
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "duration"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "耗时"
+              },
+              {
+                "id": "custom.width",
+                "value": 180
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "basic",
+                  "valueDisplayMode": "text"
+                }
+              },
+              {
+                "id": "min",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "description": "支持按列排序和筛选；耗时条按当前结果范围比较，不表示 SLO 或错误等级。点击 Trace ID 打开 Jaeger 详情。"
+    },
+    {
+      "id": 3,
+      "title": "",
+      "type": "text",
+      "transparent": true,
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 24,
+        "h": 3
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**阅读提示**  ·  耗时条帮助比较当前结果；列表仅展示已采集且未过期的 trace，不等同于全部请求。\n\n**没有结果？** 将最小耗时改为 `0ms`、清空操作名和标签，并扩大右上角时间范围。"
+      }
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "title": "指标概览",
+      "type": "link",
+      "url": "/d/xscope-overview/xscope-overview",
+      "keepTime": true,
+      "targetBlank": false
+    }
+  ]
+}

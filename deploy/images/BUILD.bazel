@@ -69,3 +69,13 @@ filegroup(
     output_group = "tarball",
     target_compatible_with = ["@platforms//os:linux"],
 )
+
+[
+    filegroup(
+        name = name + "_tarball",
+        srcs = [name + "_load"],
+        output_group = "tarball",
+        target_compatible_with = ["@platforms//os:linux"],
+    )
+    for name in ["control-plane", "gateway", "cluster-agent", "operator", "runtime"]
+]

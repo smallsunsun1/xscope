@@ -11,7 +11,7 @@ scrape_configs:
         namespaces: { names: [xscope-system] }
     relabel_configs:
       - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
-        regex: gateway|control-plane|runtime|operator|cluster-agent
+        regex: gateway|control-plane|runtime|runtime-canary|operator|cluster-agent
         action: keep
       - source_labels: [__meta_kubernetes_pod_phase]
         regex: Running
@@ -35,7 +35,7 @@ scrape_configs:
         namespaces: { names: [xscope-system] }
     relabel_configs:
       - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_container_port_name]
-        regex: inference-serving;health
+        regex: inference-serving(-canary)?;health
         action: keep
       - source_labels: [__meta_kubernetes_pod_name]
         target_label: pod
@@ -47,12 +47,18 @@ scrape_configs:
         namespaces: { names: [xscope-system] }
     relabel_configs:
       - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_container_port_name]
-        regex: inference-serving;epp
+        regex: inference-serving(-canary)?;epp
         action: keep
       - source_labels: [__meta_kubernetes_pod_ip]
         target_label: __address__
         replacement: $1:9090
       - source_labels: [__meta_kubernetes_pod_name]
         target_label: pod
+      # Autoscaling queries must isolate the serving entry even when multiple
+      # EPP instances expose the same model_name. These labels are admin-owned.
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        target_label: service
       - target_label: cluster
         replacement: docker-desktop
