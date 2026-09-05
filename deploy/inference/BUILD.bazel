@@ -1,0 +1,34 @@
+load("@rules_python//python:defs.bzl", "py_test")
+load("@xscope_pypi//:requirements.bzl", "requirement")
+
+genrule(
+    name = "crds",
+    srcs = [
+        "@inference_pool_crd//file",
+        "@inference_objective_crd//file",
+        "@inference_model_rewrite_crd//file",
+    ],
+    outs = ["inference-crds.yaml"],
+    cmd = "for schema in $(SRCS); do printf '\\n---\\n'; cat \"$$schema\"; done > $@",
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "config_test",
+    srcs = ["config_test.py"],
+    args = [
+        "$(location //deploy/k8s/serving:envoy.yaml)",
+        "$(location //deploy/k8s/serving:resources.yaml)",
+        "$(location :crds)",
+        "$(location //deploy/k8s/serving:plugins.yaml)",
+        "$(location //deploy/k8s/serving:plugins-vllm.yaml)",
+    ],
+    data = [
+        "//deploy/k8s/serving:envoy.yaml",
+        "//deploy/k8s/serving:resources.yaml",
+        "//deploy/k8s/serving:plugins.yaml",
+        "//deploy/k8s/serving:plugins-vllm.yaml",
+        ":crds",
+    ],
+    deps = [requirement("pyyaml")],
+)

@@ -1,0 +1,23 @@
+# Adapted from llm-d-router v0.9.0's official default profile (Apache-2.0).
+# Select this file only for real vLLM-compatible metrics; not for echo Runtime.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: queue-scorer
+  - type: kv-cache-utilization-scorer
+  - type: prefix-cache-scorer
+  - type: metrics-data-source
+    parameters:
+      scheme: http
+      path: /metrics
+      insecureSkipVerify: false
+  - type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: queue-scorer
+        weight: 2
+      - pluginRef: kv-cache-utilization-scorer
+        weight: 2
+      - pluginRef: prefix-cache-scorer
+        weight: 3

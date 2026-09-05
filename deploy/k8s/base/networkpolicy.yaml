@@ -75,7 +75,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: gateway
+              app.kubernetes.io/name: inference-serving
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: control-plane

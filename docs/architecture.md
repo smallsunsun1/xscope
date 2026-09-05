@@ -21,12 +21,12 @@
               PostgreSQL│                                    │      ▼
                         ▼                                    │  Kafka/Redpanda
                  ┌──────────────┐                             │      │
-                 │ Go Cluster   │                             │      ▼
+                 │ Rust Cluster   │                             │      ▼
                  │ Agent        │                             │ meter/ledger
                  └──────┬───────┘                             │
                         ▼                                     │
                  ┌──────────────┐                             │
-                 │ Go Operator  │                             │
+                 │ Rust Operator  │                             │
                  │ CRD reconcile│                             │
                  └──────┬───────┘                             │
                         ▼                                     ▼
@@ -94,7 +94,7 @@
 
 - 根目录：Bazel/Bzlmod 统一构建、测试与后续镜像产出；语言 manifest 和 lockfile 是依赖解析输入。
 - `rust/`：Cargo workspace + rules_rust crate_universe；Axum/SeaORM 承担全部业务控制面和 PostgreSQL 访问，Pingora 承担连接池、HTTP 代理、健康检查、鉴权、Redis 配额与 usage。
-- `go/`：单一 Go module + rules_go/Gazelle；只保留 cluster-agent、CRD 类型与 Operator，使用 controller-runtime 和 Kubernetes 原生 API，不承载账号、财务或订单逻辑。
+- `rust/crates/{kubernetes,cluster-agent,operator}`：kube-rs 类型、管理 API 和 kube-runtime 协调器；保持独立集群身份和 RBAC 边界，不承载账号、财务或订单逻辑。项目不再包含 Go module。
 - `python/`：pyproject/src layout + rules_python；FastAPI、Pydantic 承担协议校验和开发 runtime。
 - TypeScript：Web 控制台与可选 Node SDK。
 

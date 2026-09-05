@@ -1,0 +1,148 @@
+# Adapted from GAIE v1.5.0 standalone chart (Apache-2.0).
+# EPP owns model Pod selection. No static model addresses or fallback routes.
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 19000 }
+static_resources:
+  listeners:
+    - name: serving
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8085 }
+      per_connection_buffer_limit_bytes: 32768
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: serving
+                tracing:
+                  random_sampling: { value: 100 }
+                  provider:
+                    name: envoy.tracers.opentelemetry
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                      service_name: xscope-envoy
+                      grpc_service:
+                        envoy_grpc: { cluster_name: otel }
+                        timeout: 3s
+                normalize_path: true
+                stream_idle_timeout: 300s
+                common_http_protocol_options:
+                  headers_with_underscores_action: REJECT_REQUEST
+                route_config:
+                  name: inference
+                  virtual_hosts:
+                    - name: inference
+                      domains: ["*"]
+                      routes:
+                        - match: { path: /v1/chat/completions }
+                          route:
+                            cluster: inference_pool
+                            # SSE may be long-lived; no automatic POST retry.
+                            timeout: 0s
+                http_filters:
+                  - name: envoy.filters.http.ext_proc
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                      failure_mode_allow: false
+                      grpc_service:
+                        envoy_grpc: { cluster_name: epp }
+                      message_timeout: 30s
+                      processing_mode:
+                        request_header_mode: SEND
+                        response_header_mode: SEND
+                        request_body_mode: FULL_DUPLEX_STREAMED
+                        response_body_mode: FULL_DUPLEX_STREAMED
+                        request_trailer_mode: SEND
+                        response_trailer_mode: SEND
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                      suppress_envoy_headers: true
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          request_id: "%REQ(X-REQUEST-ID)%"
+                          trace_id: "%TRACE_ID%"
+                          selected_endpoint: "%UPSTREAM_HOST%"
+                          status: "%RESPONSE_CODE%"
+                          response_flags: "%RESPONSE_FLAGS%"
+                          duration_ms: "%DURATION%"
+    - name: health
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 19001 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: health
+                route_config:
+                  name: health
+                  virtual_hosts:
+                    - name: health
+                      domains: ["*"]
+                      routes:
+                        - match: { path: /readyz }
+                          direct_response: { status: 200 }
+                        - match: { path: /metrics }
+                          route: { cluster: admin_metrics, prefix_rewrite: /stats/prometheus }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: admin_metrics
+      type: STATIC
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: admin_metrics
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 19000 }
+    - name: otel
+      type: STRICT_DNS
+      connect_timeout: 3s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config: { http2_protocol_options: {} }
+      load_assignment:
+        cluster_name: otel
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: jaeger, port_value: 4317 }
+    - name: inference_pool
+      type: ORIGINAL_DST
+      connect_timeout: 3s
+      lb_policy: CLUSTER_PROVIDED
+      original_dst_lb_config:
+        use_http_header: true
+        http_header_name: x-gateway-destination-endpoint
+    - name: epp
+      type: STATIC
+      connect_timeout: 3s
+      # EPP is in this same Pod; self-signed TLS follows the upstream recipe.
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context: {}
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config: { http2_protocol_options: {} }
+      load_assignment:
+        cluster_name: epp
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 9002 }

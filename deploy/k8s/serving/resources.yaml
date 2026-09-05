@@ -1,0 +1,174 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: xscope-serving
+  namespace: xscope-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: xscope-serving
+  namespace: xscope-system
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [inference.networking.k8s.io]
+    resources: [inferencepools]
+    verbs: [get, list, watch]
+  - apiGroups: [llm-d.ai]
+    resources: [inferenceobjectives, inferencemodelrewrites]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: xscope-serving
+  namespace: xscope-system
+subjects:
+  - kind: ServiceAccount
+    name: xscope-serving
+    namespace: xscope-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: xscope-serving
+---
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: demo-pool
+  namespace: xscope-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runtime
+  targetPorts:
+    - number: 8090
+  endpointPickerRef:
+    name: inference-serving
+    port: { number: 9002 }
+    failureMode: FailClose
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-serving
+  namespace: xscope-system
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: inference-serving }
+  ports:
+    - { name: http, port: 8085, targetPort: http }
+    - { name: epp, port: 9002, targetPort: epp }
+    - { name: metrics, port: 9090, targetPort: 9090 }
+    - { name: envoy-metrics, port: 19001, targetPort: health }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-serving
+  namespace: xscope-system
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: inference-serving }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: inference-serving
+        app.kubernetes.io/part-of: xscope
+        app.kubernetes.io/component: inference-routing
+    spec:
+      serviceAccountName: xscope-serving
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:distroless-v1.38.2@sha256:098e2e3669e474c152a0e29cef368cbe73ca9d97951afad1fc74d77d9928013e
+          args: ["-c", "/etc/envoy/envoy.yaml", "--concurrency", "1", "--log-level", "warn", "--drain-time-s", "5"]
+          ports:
+            - { name: http, containerPort: 8085 }
+            - { name: health, containerPort: 19001 }
+          readinessProbe: { httpGet: { path: /readyz, port: health } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 20m, memory: 48Mi }
+            limits: { cpu: 300m, memory: 192Mi }
+          volumeMounts:
+            - { name: envoy-config, mountPath: /etc/envoy, readOnly: true }
+        - name: epp
+          image: ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0@sha256:873179822ab0895a37ea09f2112ca39a6ae50a26612561c8bfad7f9a8c5af6f5
+          args:
+            - --pool-name=demo-pool
+            - --pool-namespace=xscope-system
+            - --pool-group=inference.networking.k8s.io
+            - --config-file=/etc/epp/plugins.yaml
+            - --zap-encoder=json
+            - --zap-devel=false
+            - --zap-log-level=info
+            - --refresh-metrics-interval=1s
+            - --metrics-staleness-threshold=5s
+            - --tracing=true
+            - --metrics-port=9090
+            - --enable-grpc-stream-metrics=true
+            - --metrics-endpoint-auth=false
+            - --enable-pprof=false
+          env:
+            - { name: GOMAXPROCS, value: "1" }
+            - { name: OTEL_TRACES_EXPORTER, value: otlp }
+            - { name: OTEL_SERVICE_NAME, value: xscope-epp }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://jaeger:4317" }
+            - { name: OTEL_TRACES_SAMPLER, value: parentbased_traceidratio }
+            - { name: OTEL_TRACES_SAMPLER_ARG, value: "1.0" }
+            - name: NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+          ports:
+            - { name: epp, containerPort: 9002 }
+            - { name: epp-health, containerPort: 9003 }
+          readinessProbe:
+            grpc: { port: 9003, service: inference-extension }
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 30m, memory: 96Mi }
+            limits: { cpu: 400m, memory: 384Mi }
+          volumeMounts:
+            - { name: epp-config, mountPath: /etc/epp, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: envoy-config
+          configMap: { name: xscope-serving-envoy }
+        - name: epp-config
+          configMap: { name: xscope-serving-epp }
+        - name: tmp
+          emptyDir: { sizeLimit: 16Mi }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: inference-serving-ingress
+  namespace: xscope-system
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: inference-serving }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: gateway }
+      ports:
+        - { protocol: TCP, port: 8085 }

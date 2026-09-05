@@ -18,7 +18,7 @@ type Navigate = (page: string) => void;
 const components = [
   { name: "Gateway", detail: "Pingora · :8080", component: "gateway" },
   { name: "Runtime", detail: "FastAPI · :8090", component: "runtime" },
-  { name: "Operator", detail: "controller-runtime · :8082", component: "operator" },
+  { name: "Operator", detail: "kube-rs · :8082", component: "operator" },
 ];
 
 function ComponentRow({ name, detail, component }: (typeof components)[number]) {

@@ -1,0 +1,34 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("@xscope_pypi//:requirements.bzl", "requirement")
+
+py_test(
+    name = "streaming_e2e_test",
+    srcs = ["streaming_e2e_test.py"],
+    args = ["$(rlocationpath //rust/crates/gateway)", "$(rlocationpath //python:runtime)"],
+    data = ["//rust/crates/gateway", "//python:runtime"],
+    deps = ["@rules_python//python/runfiles"],
+    size = "medium",
+)
+
+py_binary(
+    name = "inference_cluster_smoke",
+    srcs = ["inference_cluster_smoke.py"],
+)
+
+py_binary(
+    name = "kubernetes_cluster_smoke",
+    srcs = ["kubernetes_cluster_smoke.py"],
+)
+
+py_binary(
+    name = "telemetry_cluster_smoke",
+    srcs = ["telemetry_cluster_smoke.py"],
+)
+
+py_test(
+    name = "observability_config_test",
+    srcs = ["observability_config_test.py"],
+    args = ["$(location //deploy/k8s/observability:resources.yaml)", "$(location //deploy/k8s/observability:prometheus.yaml)", "$(location //deploy/k8s/observability:jaeger.yaml)"],
+    data = ["//deploy/k8s/observability:resources.yaml", "//deploy/k8s/observability:prometheus.yaml", "//deploy/k8s/observability:jaeger.yaml"],
+    deps = [requirement("pyyaml")],
+)

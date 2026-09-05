@@ -6,17 +6,20 @@ XScope 是一个面向大模型 API 的云原生服务平台。源码按语言�
 
 | 目录 | 工具链 | 职责 |
 | --- | --- | --- |
-| `rust/gateway` | Cargo workspace、Pingora 0.8、Redis、rules_rust | 鉴权、全局 RPM/TPM、加权路由、HTTP 代理、usage WAL |
-| `rust/services/control-plane` | Axum、SeaORM、PostgreSQL、rules_rust | 身份/租户、项目/API Key、计量、订单、支付退款、账本、发票和管理 API |
+| `rust/crates/gateway` | Rust workspace、Pingora 0.8、Redis、rules_rust | 鉴权、全局 RPM/TPM、HTTP/SSE 代理、取消传播、usage WAL |
+| `rust/crates/control-plane` | Axum、SeaORM、PostgreSQL、rules_rust | 身份/租户、项目/API Key、计量、订单、支付退款、账本、发票和管理 API |
 | `rust/crates/{domain,entities,migration}` | Rust workspace、SeaORM 2 | 业务领域、数据库实体和版本化迁移 |
-| `go/cluster-agent` | Go module、chi、controller-runtime、rules_go | 控制面与成员 Kubernetes 集群之间的窄权限 API |
-| `go/operator` | controller-runtime、Kubernetes API | 将 `ModelDeployment` 协调为 Deployment/Service 并回写状态 |
-| `go/api` | Kubernetes API types | `platform.xscope.io/v1alpha1` 类型定义 |
+| `rust/crates/cluster-agent` | Axum、kube-rs | 控制面与成员 Kubernetes 集群之间的窄权限 API |
+| `rust/crates/operator` | kube-runtime、kube-leader-election | 将 `ModelDeployment` 协调为 Deployment/Service，Lease 选主与状态回写 |
+| `rust/crates/kubernetes` | kube-rs、k8s-openapi | 兼容现有 CRD 的类型、校验与资源协调逻辑 |
+| `rust/crates/telemetry` | tracing、OpenTelemetry、Prometheus | Rust 服务共享的日志、追踪和指标 |
 | `python` | pyproject、FastAPI、Pydantic | OpenAI Chat Completions 开发 runtime |
 | `web` | React、Ant Design、TanStack Query、Vite、rules_js | 管理控制台 |
 | `api` / `deploy` | OpenAPI、JSON Schema、YAML | 对外契约和 Kubernetes 清单 |
 
-推荐直接打开 `xscope.code-workspace`。它已经为 rust-analyzer、gopls、Python/Pylance 和 TypeScript 配置了各自的项目入口。Cargo、`go.mod`、`pyproject.toml` 是 IDE 和语言工具的依赖事实来源，Bazel 从这些锁文件导入依赖并统一编排。
+推荐直接打开 `xscope.code-workspace`。全部 Rust package 位于 `rust/crates/`，workspace 根清单位于 `rust/Cargo.toml`，保留给 IDE 和 Bazel 依赖解析使用。应用编译、测试与镜像打包仅使用 Bazel，不再包含 Go 源码或 Go module。
+
+首次打开或修改依赖后，运行 `bazel run @rules_rust//tools/rust_analyzer:gen_rust_project -- //rust/crates/...`，再重载 rust-analyzer。[工作区和迁移说明](docs/rust-workspace.md)。
 
 ## 开发
 
@@ -28,7 +31,7 @@ bazel build //...
 bazel test //...
 
 # 局部测试也使用 Bazel
-bazel test //rust/... //go/... //python:runtime_test
+bazel test //rust/... //python:runtime_test
 
 # Web：安装 IDE 可见的 node_modules、检查并构建可部署产物
 bazel run -- @pnpm//:pnpm --dir "$PWD/web" install --frozen-lockfile
@@ -36,7 +39,7 @@ bazel test //web/console:typecheck
 bazel build //web/console:console
 ```
 
-Bazel 依赖映射：Go 由 Gazelle 读取 `go/go.mod`，Rust crate_universe 读取 `rust/Cargo.toml` 和 `rust/Cargo.lock`，Python pip hub 读取 uv 生成的 `python/requirements.lock`，Web 由 rules_js 读取 `web/pnpm-lock.yaml`。前端依赖变化后，用 Bazel 管理的 pnpm 更新锁文件：
+Bazel 依赖映射：Rust crate_universe 读取 `rust/Cargo.toml` 和 `rust/Cargo.lock`，Python pip hub 读取 `python/requirements.lock` 和 Bazel 锁定的 `python/telemetry.lock`，Web 由 rules_js 读取 `web/pnpm-lock.yaml`。前端依赖变化后，用 Bazel 管理的 pnpm 更新锁文件：
 
 ```bash
 bazel run -- @pnpm//:pnpm --dir "$PWD/web" install --lockfile-only
@@ -49,7 +52,7 @@ bazel run -- @pnpm//:pnpm --dir "$PWD/web" install --lockfile-only
 分别启动控制面和前端开发服务器：
 
 ```bash
-bazel run //rust/services/control-plane
+bazel run //rust/crates/control-plane
 
 # 在仓库根目录的另一个终端
 bazel run -- @pnpm//:pnpm --dir "$PWD/web" dev
@@ -57,14 +60,14 @@ bazel run -- @pnpm//:pnpm --dir "$PWD/web" dev
 
 打开 `http://127.0.0.1:5173`。生产静态文件位于 `bazel-bin/web/console/dist`。VS Code 补全依赖 `web/node_modules`，首次拉取代码后执行上面的 frozen-lockfile 安装命令即可。
 
-启动开发 runtime 后，用 JSON 注入网关 Key 和 endpoint：
+仅做本机传输调试时，可直接启动开发 runtime，并把它作为测试 serving 入口（不经过 EPP；集群部署使用下面的 InferencePool 链路）：
 
 ```bash
 bazel run //python:runtime
 
 XSCOPE_API_KEYS_JSON='[{"id":"key-local","tenant_id":"tenant-local","project_id":"project-local","secret":"xscope-local-secret"}]' \
-XSCOPE_UPSTREAMS_JSON='[{"id":"runtime-dev","address":"127.0.0.1:8090","weight":100}]' \
-bazel run //rust/gateway
+XSCOPE_SERVING_ENTRY_JSON='{"id":"test-pool","model":"xscope-demo","address":"127.0.0.1:8090"}' \
+bazel run //rust/crates/gateway
 
 curl http://127.0.0.1:8080/v1/chat/completions \
   # Authorization credentials are supplied from a runtime secret.
@@ -73,6 +76,10 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 Pingora 在内存中只保留 Key 的 SHA-256 摘要，并校验 Scope、允许模型、过期时间、月预算和预付余额。网关从控制面的内部接口轮询策略并原子替换 last-known-good 快照；静态 Key 仅作为启动回退。多网关副本通过 Redis Lua 原子预占 RPM/TPM，并在响应后按真实 token 回补。通过策略校验的请求会先把 usage 写入 append-only WAL，再异步上报；Kubernetes 部署中的 WAL 位于持久卷 `/var/lib/xscope/usage-wal/events.jsonl`。Rust 控制面通过 SeaORM 以 `event_id` 幂等写入 PostgreSQL，并生成精确到微分单位的双分录。
+
+推理请求支持 `stream: true`，逐块透传 SSE，并在客户端断开时取消上游请求。计量解析使用 `sse-core`，不拼接整段输出；未知 usage 不再作为 0 token 成功请求处理。协议、测试和计费边界见 [流式推理说明](docs/streaming.md)。
+
+集群推理链路为 Pingora → `inference-serving`（Envoy + llm-d EPP）→ `InferencePool/demo-pool` 中的 Runtime Pods。Pingora 不再维护模型 Pod 列表或选择模型副本。路由部署、资源边界与验证步骤见 [InferencePool 接入说明](docs/inference-serving.md)。
 
 Kubernetes Secret 的 `keys.json` 字段使用同一个 JSON 格式：
 
@@ -113,8 +120,10 @@ Keycloak 管理员 `admin` / `xscope-local-keycloak-admin`，推理 API Key
 `xscope-local-secret`。这些值位于 `deploy/k8s/overlays/local/secrets.yaml`，不得用于共享或
 生产集群。
 
-网关统一使用 `tracing`；本地 Kubernetes overlay 输出 JSON 日志。可通过 `RUST_LOG` 调整
+Rust 服务统一使用 `tracing`；本地 Kubernetes overlay 输出 JSON 日志。可通过 `RUST_LOG` 调整
 target 过滤规则，并通过 `XSCOPE_LOG_FORMAT=compact|json` 选择输出格式。
+已部署低资源的 Jaeger 与 Prometheus，提供 OTLP 追踪及逐 Pod 指标采集；查看方式、
+验证命令与尚未完成的边界见 [可观测性说明](docs/observability.md)。
 
 本地部署同时携带 `XSCOPE_CLUSTER_ID=docker-desktop` 与 `XSCOPE_REGION=local`。Operator
 会把它们写入模型工作负载标签和 `ModelDeployment.status`，为后续把数据面独立安装到多个
@@ -123,20 +132,20 @@ target 过滤规则，并通过 `XSCOPE_LOG_FORMAT=compact|json` 选择输出格
 Operator 必须运行在集群内或具备有效 kubeconfig：
 
 ```bash
-bazel run //go/operator/cmd/operator
+bazel run //rust/crates/operator
 ```
 
 ## 垂直切片进度
 
 1. 已完成：Rust/Axum/SeaORM 控制面、PostgreSQL 账号与租户成员、项目/API Key、模型目录和报价，以及 Ant Design 管理台。
-2. 已完成：Rust 控制面经 Go cluster-agent 创建/扩缩/删除 `ModelDeployment`；Go Operator 只负责 Kubernetes reconcile。
+2. Rust 控制面经 kube-rs cluster-agent 创建/扩缩/删除 `ModelDeployment`；独立 Rust Operator 只负责 Kubernetes reconcile，业务控制面仍不持有 Kubernetes 凭证。
 3. 已完成初版：Pingora 执行 Scope、模型、过期、月预算、余额门禁；Redis Lua 在所有网关副本间执行 RPM/TPM 预占与结算。
 4. 已完成初版：usage 持久化 WAL、至少一次上报、数据库幂等去重、精确费用、充值/支付/退款、双分录、发票记录和渠道对账。
 5. 按顺序推进：SSE/取消 → InferencePool/llm-d EPP → RoutePolicy/stable-canary → HPA/PDB/资源所有权 → 计费预占/WAL checkpoint/事件流 → 多集群 → 可观测性/审计 → 正式支付税务与更多推理 API。验收状态见 `docs/implementation-sequence.md`。
 
 ## 工程约定
 
-- Bazel/Bzlmod 是统一 CI/发布构建入口；语言自身的 manifest 与 lockfile 是依赖事实来源，也保留原生 IDE、测试和本地反馈链路。
+- Bazel/Bzlmod 是开发、测试和发布的统一构建入口；语言自身的 manifest 与 lockfile 保留为依赖和 IDE 元数据，不再维护第二套原生构建路径。
 - 公共边界用 OpenAPI、JSON Schema，后续内部高频 RPC 再引入 Protobuf/gRPC。
 - 金额使用最小货币单位整数，token/请求量使用整数；usage event 只追加、不原地更新。
 - 所有资源都携带 `tenant_id`、`project_id`、`region`，所有写接口接受幂等键。

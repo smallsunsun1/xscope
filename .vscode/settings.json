@@ -1,19 +1,11 @@
 {
   "rust-analyzer.linkedProjects": [
-    "${workspaceFolder}/rust/Cargo.toml"
+    "${workspaceFolder}/rust-project.json"
   ],
   "rust-analyzer.cargo.allTargets": true,
-  "rust-analyzer.check.command": "clippy",
-  "go.toolsEnvVars": {
-    "GOWORK": "off"
-  },
-  "gopls": {
-    "directoryFilters": [
-      "-rust",
-      "-python",
-      "-web"
-    ]
-  },
+  "rust-analyzer.checkOnSave": false,
+  "rust-analyzer.cargo.buildScripts.enable": false,
+  "rust-analyzer.procMacro.enable": true,
   "python.defaultInterpreterPath": "${workspaceFolder}/python/.venv/bin/python",
   "python.analysis.extraPaths": [
     "${workspaceFolder}/python/src"

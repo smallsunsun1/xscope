@@ -1,0 +1,9 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+rust_binary(
+    name = "operator", srcs = glob(["src/*.rs"]), crate_root = "src/main.rs",
+    crate_name = "xscope_operator", edition = crate_edition(), aliases = aliases(),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = ["//rust/crates/kubernetes", "//rust/crates/telemetry"] + all_crate_deps(normal = True),
+    visibility = ["//visibility:public"],
+)

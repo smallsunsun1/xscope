@@ -1,0 +1,14 @@
+# Echo has no GPU/cache metrics. EPP counts requests it has dispatched and
+# prefers less busy endpoints. Do not invent vLLM metrics for a fake engine.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+dataLayer:
+  injectDefaults: false
+  sources: []
+plugins:
+  - type: active-request-scorer
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: active-request-scorer
+        weight: 1

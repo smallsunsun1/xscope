@@ -27,10 +27,10 @@ pkg_tar(
         mode = "0555",
     )
     for name, target in {
-        "control-plane": "//rust/services/control-plane",
-        "gateway": "//rust/gateway",
-        "cluster-agent": "//go/cluster-agent/cmd/server",
-        "operator": "//go/operator/cmd/operator",
+        "control-plane": "//rust/crates/control-plane",
+        "gateway": "//rust/crates/gateway",
+        "cluster-agent": "//rust/crates/cluster-agent",
+        "operator": "//rust/crates/operator",
     }.items()
 ]
 
@@ -47,7 +47,7 @@ pkg_tar(
     for name, entrypoint in {
         "control-plane": "/usr/local/bin/control-plane",
         "gateway": "/usr/local/bin/gateway",
-        "cluster-agent": "/usr/local/bin/server",
+        "cluster-agent": "/usr/local/bin/cluster-agent",
         "operator": "/usr/local/bin/operator",
         "runtime": "/app/runtime",
     }.items()

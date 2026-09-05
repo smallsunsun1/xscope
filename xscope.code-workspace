@@ -1,13 +1,13 @@
 {
   "folders": [
     { "name": "XScope", "path": "." },
-    { "name": "Go", "path": "go" },
     { "name": "Rust", "path": "rust" },
     { "name": "Python", "path": "python" },
     { "name": "Web", "path": "web" }
   ],
   "settings": {
-    "rust-analyzer.linkedProjects": ["rust/Cargo.toml"],
+    "rust-analyzer.linkedProjects": ["rust-project.json"],
+    "rust-analyzer.checkOnSave": false,
     "python.defaultInterpreterPath": "python/.venv/bin/python",
     "python.analysis.extraPaths": ["python/src"],
     "typescript.tsdk": "web/node_modules/typescript/lib",

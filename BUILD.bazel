@@ -1,8 +1,4 @@
-load("@gazelle//:def.bzl", "gazelle")
-
 package(default_visibility = ["//visibility:public"])
-
-gazelle(name = "gazelle")
 
 filegroup(
     name = "api-contracts",
@@ -19,22 +15,22 @@ filegroup(
 
 alias(
     name = "control-plane",
-    actual = "//rust/services/control-plane",
+    actual = "//rust/crates/control-plane",
 )
 
 alias(
     name = "cluster-agent",
-    actual = "//go/cluster-agent/cmd/server",
+    actual = "//rust/crates/cluster-agent",
 )
 
 alias(
     name = "operator",
-    actual = "//go/operator/cmd/operator",
+    actual = "//rust/crates/operator",
 )
 
 alias(
     name = "gateway",
-    actual = "//rust/gateway",
+    actual = "//rust/crates/gateway",
 )
 
 alias(

@@ -1,0 +1,21 @@
+groups:
+  - name: xscope-serving
+    rules:
+      - alert: XScopeTelemetryTargetDown
+        expr: up{job=~"xscope|envoy|epp"} == 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "XScope telemetry target is unavailable"
+      - alert: XScopeInferenceErrors
+        expr: sum(rate(xscope_http_requests_total{component="gateway",route="/v1/chat/completions",outcome="provider_error"}[5m])) / clamp_min(sum(rate(xscope_http_requests_total{component="gateway",route="/v1/chat/completions"}[5m])), 0.001) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Inference provider error ratio exceeds 5%"
+      - alert: XScopeUsageDeliveryFailure
+        expr: sum(increase(xscope_background_events_total{operation=~"wal_append|usage_queue|usage_export",outcome=~"error|full|rejected|retry"}[5m])) > 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Usage persistence or delivery needs investigation"

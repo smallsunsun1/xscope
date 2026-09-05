@@ -3,8 +3,12 @@ members = [
     "crates/domain",
     "crates/entities",
     "crates/migration",
-    "gateway",
-    "services/control-plane",
+    "crates/telemetry",
+    "crates/gateway",
+    "crates/control-plane",
+    "crates/kubernetes",
+    "crates/cluster-agent",
+    "crates/operator",
 ]
 resolver = "3"
 
@@ -23,12 +27,22 @@ chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6.2.1"
 getrandom = "0.3"
 http = "1"
+kube = { version = "4.2", default-features = false, features = ["client", "runtime", "derive", "rustls-tls"] }
+k8s-openapi = { version = "0.28", features = ["v1_34"] }
+kube-leader-election = "0.44"
+futures = "0.3"
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls-webpki-roots"] }
+prometheus = { version = "0.14", default-features = false }
+tracing-opentelemetry = "0.32"
 pingora-core = { version = "0.8.1", features = ["rustls"] }
 pingora-error = "0.8.1"
 pingora-http = "0.8.1"
 pingora-load-balancing = "0.8.1"
 pingora-proxy = { version = "0.8.1", features = ["rustls"] }
 redis = { version = "1.6.0", features = ["script"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json"] }
 sea-orm = { version = "2.0.0", default-features = false, features = ["macros", "postgres-array", "runtime-tokio-rustls", "sqlx-postgres", "with-chrono", "with-json", "with-uuid"] }
 sea-orm-migration = { version = "2.0.0", default-features = false, features = ["runtime-tokio-rustls", "sqlx-postgres"] }
@@ -39,6 +53,7 @@ subtle = "2"
 thiserror = "2"
 tiktoken-rs = "0.12.0"
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+sse-core = { version = "0.2.3", default-features = false, features = ["std"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["catch-panic", "fs", "request-id", "set-header", "trace"] }
 tracing = "0.1"

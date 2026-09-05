@@ -1,5 +1,14 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@xscope_pypi//:requirements.bzl", "requirement")
+load("@rules_python//python:pip.bzl", "compile_pip_requirements")
+load("@xscope_telemetry_pypi//:requirements.bzl", telemetry_requirement = "requirement")
+
+compile_pip_requirements(
+    name = "telemetry_requirements",
+    requirements_in = "telemetry.in",
+    requirements_txt = "telemetry.lock",
+    tags = ["manual"],
+)
 
 py_library(
     name = "runtime_lib",
@@ -9,6 +18,9 @@ py_library(
         requirement("fastapi"),
         requirement("pydantic"),
         requirement("uvicorn"),
+        telemetry_requirement("opentelemetry-sdk"),
+        telemetry_requirement("opentelemetry-exporter-otlp-proto-http"),
+        telemetry_requirement("prometheus-client"),
     ],
 )
 
@@ -17,6 +29,7 @@ py_binary(
     srcs = [
         "src/xscope_runtime/__init__.py",
         "src/xscope_runtime/main.py",
+        "src/xscope_runtime/telemetry.py",
     ],
     imports = ["src"],
     main = "src/xscope_runtime/main.py",
@@ -25,6 +38,9 @@ py_binary(
         requirement("fastapi"),
         requirement("pydantic"),
         requirement("uvicorn"),
+        telemetry_requirement("opentelemetry-sdk"),
+        telemetry_requirement("opentelemetry-exporter-otlp-proto-http"),
+        telemetry_requirement("prometheus-client"),
     ],
 )
 

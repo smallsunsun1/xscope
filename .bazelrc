@@ -1,6 +1,5 @@
 common --enable_bzlmod
 common --announce_rc
-common --repo_env=GOPROXY=https://mirrors.aliyun.com/goproxy,direct
 build --show_timestamps
 build --keep_going
 test --test_output=errors

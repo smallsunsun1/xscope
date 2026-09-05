@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: XScope OpenAI-compatible Inference API
   version: 0.1.0
-  description: Development non-streaming chat-completions contract.
+  description: Chat completions with incremental SSE and downstream cancellation propagation.
 paths:
   /v1/chat/completions:
     post:
@@ -15,12 +15,20 @@ paths:
             schema: { $ref: "#/components/schemas/ChatCompletionRequest" }
       responses:
         "200":
-          description: A completed assistant response.
+          description: A complete JSON response or an incremental SSE stream ending in [DONE]. After streaming headers are sent, provider failures terminate the stream rather than replace the HTTP status.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ChatCompletion" }
+            text/event-stream:
+              schema:
+                type: string
+                description: Each data event is a chat.completion.chunk JSON object; a final usage chunk precedes the data event [DONE]. The gateway requests usage even when the caller does not explicitly opt in.
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
+        "402": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
 components:
@@ -58,7 +66,11 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/Message" }
-        stream: { const: false, default: false }
+        stream: { type: boolean, default: false }
+        stream_options:
+          type: [object, "null"]
+          properties:
+            include_usage: { type: boolean, default: false }
     ChatCompletion:
       type: object
       required: [id, object, created, model, choices, usage]

@@ -39,7 +39,7 @@
     "cached_input_tokens": { "type": "integer", "minimum": 0, "default": 0 },
     "latency_ms": { "type": "integer", "minimum": 0 },
     "time_to_first_token_ms": { "type": "integer", "minimum": 0 },
-    "status": { "enum": ["succeeded", "client_error", "provider_error", "cancelled"] },
+    "status": { "enum": ["succeeded", "client_error", "provider_error", "cancelled", "usage_pending"] },
     "labels": { "type": "object", "additionalProperties": { "type": "string" } }
   }
 }

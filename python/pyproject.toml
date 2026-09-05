@@ -11,6 +11,9 @@ dependencies = [
   "fastapi>=0.116,<1",
   "pydantic>=2.11,<3",
   "uvicorn[standard]>=0.35,<1",
+  "opentelemetry-sdk==1.38.0",
+  "opentelemetry-exporter-otlp-proto-http==1.38.0",
+  "prometheus-client==0.23.1",
 ]
 
 [project.optional-dependencies]

@@ -10,3 +10,5 @@ resources:
   - rbac.yaml
   - workloads.yaml
   - services.yaml
+  - ../serving
+  - ../observability

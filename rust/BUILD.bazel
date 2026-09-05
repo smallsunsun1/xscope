@@ -1,4 +1,18 @@
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test", "rustfmt_test")
+
 exports_files([
     "Cargo.lock",
     "Cargo.toml",
 ])
+
+rustfmt_test(
+    name = "format_test",
+    targets = ["//rust/crates/gateway", "//rust/crates/control-plane", "//rust/crates/cluster-agent", "//rust/crates/operator"],
+    transitive = True,
+)
+
+rust_clippy_test(
+    name = "clippy_test",
+    targets = ["//rust/crates/gateway", "//rust/crates/control-plane", "//rust/crates/cluster-agent", "//rust/crates/operator"],
+    transitive = True,
+)

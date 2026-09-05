@@ -1,0 +1,18 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+rust_library(
+    name = "kubernetes",
+    srcs = glob(["src/*.rs"]),
+    crate_name = "xscope_kubernetes",
+    aliases = aliases(),
+    edition = crate_edition(),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = ["//rust/crates/telemetry"] + all_crate_deps(normal = True),
+    visibility = ["//visibility:public"],
+)
+rust_test(
+    name = "kubernetes_test",
+    crate = ":kubernetes",
+    aliases = aliases(normal_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

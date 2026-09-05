@@ -5,7 +5,7 @@
 Docker Desktop overlay 为节省资源，把管理面和数据面共同放在 `xscope-system` namespace：
 
 ```text
-OAuth2 Proxy -> Rust Control Plane + Console -> Go Cluster Agent -> Kubernetes API
+OAuth2 Proxy -> Rust Control Plane + Console -> Rust Cluster Agent -> Kubernetes API
        |              |
     Keycloak ------ PostgreSQL <------ usage
 
@@ -13,7 +13,7 @@ Client -> Pingora Gateway -> development Runtime
                          Operator -> ModelDeployment workloads
 ```
 
-PostgreSQL、Redis、Keycloak、OAuth2 Proxy、Rust Control Plane、Go Cluster Agent、Pingora、Operator 和开发 Runtime 均为
+PostgreSQL、Redis、Keycloak、OAuth2 Proxy、Rust Control Plane、Rust Cluster Agent、Pingora、Operator 和开发 Runtime 均为
 单副本。模型副本和智能调度组件不常驻空闲集群，只在创建对应模型服务时消耗资源。
 
 ## 生产多集群形态
@@ -37,7 +37,7 @@ inference cluster cn   inference cluster sg
 
 - 管理面不保存成员集群的长期高权限 kubeconfig。成员集群 Agent 使用短期凭据建立出站连接，
   拉取带版本和签名的期望状态。
-- 当前本地版已把 Kubernetes client 和 RBAC 完全收敛到 Go Cluster Agent；Rust 控制面只持有
+- 当前本地版已把 Kubernetes client 和 RBAC 完全收敛到 Rust Cluster Agent；Rust 控制面只持有
   Agent 的内部服务令牌。生产版将同一 API 替换为 mTLS 出站隧道和按 `cluster_id` 注册的连接。
 - 每个数据面配置不可变的 `cluster_id`、`region` 和能力标签；Operator 把这些字段写进
   workload 标签和 `ModelDeployment.status`。

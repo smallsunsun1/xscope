@@ -13,6 +13,10 @@ kubectl -n xscope-system wait --for=delete pod -l app.kubernetes.io/name=control
 kubectl -n xscope-system wait --for=delete pod -l app.kubernetes.io/name=gateway --timeout=120s
 kubectl -n xscope-system exec statefulset/postgres -- \
   psql -v ON_ERROR_STOP=1 -U xscope -d keycloak -c 'DROP SCHEMA IF EXISTS xscope CASCADE;'
-kubectl -n xscope-system exec deployment/redis -- redis-cli FLUSHDB
+kubectl -n xscope-system exec deployment/redis -- sh -ec '
+  redis-cli --scan --pattern "xscope:quota:*" | while IFS= read -r key; do
+    redis-cli UNLINK "$key" >/dev/null
+  done
+'
 kubectl -n xscope-system delete pvc gateway-usage-wal --wait=true --timeout=120s
 echo "Removed XScope business schema, development quota state and usage WAL; Keycloak identities remain."

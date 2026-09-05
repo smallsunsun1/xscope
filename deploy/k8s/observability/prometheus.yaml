@@ -1,0 +1,58 @@
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels: { cluster: docker-desktop, environment: local }
+rule_files: [/etc/prometheus/alerts.yaml]
+scrape_configs:
+  # Pod discovery scrapes every replica independently, never a load-balanced service.
+  - job_name: xscope
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces: { names: [xscope-system] }
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        regex: gateway|control-plane|runtime|operator|cluster-agent
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_phase]
+        regex: Running
+        action: keep
+      # Kubernetes discovers one target per container port; retain only first API port.
+      - source_labels: [__meta_kubernetes_pod_container_port_name]
+        regex: http|health
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: $1:9090
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        target_label: component
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - target_label: cluster
+        replacement: docker-desktop
+  - job_name: envoy
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces: { names: [xscope-system] }
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_container_port_name]
+        regex: inference-serving;health
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - target_label: cluster
+        replacement: docker-desktop
+  - job_name: epp
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces: { names: [xscope-system] }
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_container_port_name]
+        regex: inference-serving;epp
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: $1:9090
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - target_label: cluster
+        replacement: docker-desktop

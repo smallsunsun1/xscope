@@ -1,0 +1,1 @@
+exports_files(["prometheus.yaml", "jaeger.yaml", "alerts.yaml", "resources.yaml"])

@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - resources.yaml
+configMapGenerator:
+  - name: xscope-prometheus
+    namespace: xscope-system
+    files: [prometheus.yaml, alerts.yaml]
+  - name: xscope-jaeger
+    namespace: xscope-system
+    files: [jaeger.yaml]

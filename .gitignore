@@ -10,3 +10,6 @@ __pycache__/
 *.pyc
 .DS_Store
 .build
+/rust-project.json
+/.rules_rust_analyzer/
+/.vscode/.rules_rust_analyzer/
