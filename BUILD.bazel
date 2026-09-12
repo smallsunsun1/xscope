@@ -1,6 +1,9 @@
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
+    "deploy/k8s/base/configmap.yaml",
+    "deploy/k8s/base/database.yaml",
+    "deploy/k8s/base/workloads.yaml",
     "deploy/k8s/overlays/local/kustomization.yaml",
     "deploy/k8s/overlays/local/grafana-service.yaml",
     "deploy/k8s/overlays/local/grafana-ingress.yaml",

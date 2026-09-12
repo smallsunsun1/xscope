@@ -5,7 +5,6 @@ resources:
   - ../../base
   - ../../canary
   - runtime-canary.yaml
-  - secrets.yaml
 patches:
   - path: grafana-service.yaml
   - path: grafana-ingress.yaml

@@ -13,7 +13,7 @@ import time
 import urllib.parse
 import uuid
 
-from observability_cluster import eventually, forward, kubectl, local_only, request
+from observability_cluster import eventually, forward, kubectl, local_only, request, inference_api_key
 
 
 def query(base, timestamp):
@@ -59,7 +59,7 @@ def main():
             created_dashboard = True
         request("http://127.0.0.1:30082/v1/chat/completions", {
             "model": "xscope-demo", "stream": False, "messages": [{"role": "user", "content": "persistence smoke"}]},
-            {"Authorization": "Bearer " + os.environ.get("XSCOPE_TEST_API_KEY", "xscope-local-secret"),
+            {"Authorization": "Bearer " + inference_api_key(),
              "traceparent": f"00-{trace_id}-0123456789abcdef-01"})
         with forward("jaeger", 16686) as base:
             eventually(lambda: request(base + "/api/traces/" + trace_id).get("data"))

@@ -1,5 +1,33 @@
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_python//python:defs.bzl", "py_test", "py_binary")
 load("@xscope_pypi//:requirements.bzl", "requirement")
+
+py_binary(
+    name = "managed_profile",
+    srcs = ["managed_profile.py"],
+    deps = [requirement("pyyaml")],
+)
+genrule(
+    name = "managed_envoy",
+    srcs = ["//deploy/k8s/serving:envoy.yaml"],
+    tools = [":managed_profile"],
+    outs = ["envoy-managed.json"],
+    cmd = "$(execpath :managed_profile) $(location //deploy/k8s/serving:envoy.yaml) > $@",
+    visibility = ["//visibility:public"],
+)
+py_test(
+    name = "managed_profile_test",
+    imports = ["."],
+    srcs = ["managed_profile.py", "managed_profile_test.py"],
+    deps = [requirement("pyyaml")],
+)
+
+py_binary(
+    name = "managed_envoy_check",
+    srcs = ["managed_envoy_check.py"],
+    args = ["$(rlocationpath :managed_envoy)", "$(rlocationpath //deploy/k8s/serving:resources.yaml)"],
+    data = [":managed_envoy", "//deploy/k8s/serving:resources.yaml"],
+    deps = [requirement("pyyaml"), "@rules_python//python/runfiles"],
+)
 
 genrule(
     name = "crds",

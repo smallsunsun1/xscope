@@ -66,7 +66,7 @@ def verify(api, sql, container, setup, request):
     assert check("funded", rebuild=True)[0] == 200
     assert check("funded")[1]["consistent_before"]
 
-    # Late v1 WAL usage is booked into its original UTC month, not receipt month.
+    # Late v1 HTTP usage is booked into its original UTC month, not receipt month.
     setup("projection-late")
     event = {"schema_version": "v1", "event_id": "projection-old-usage", "request_id": "projection-old-request",
         "occurred_at": str(prior) + "T00:00:00Z", "tenant_id": "test-tenant", "project_id": "projection-late", "api_key_id": "key-projection-late",

@@ -4,13 +4,14 @@ Old non-projecting binaries MUST NOT overlap with projecting writers. A failed
 cutover stays fail-closed; never auto-restart an old image over initialized counters.
 """
 import argparse
-from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 
 from observability_cluster import KUBE, kubectl, local_only
+from local_secrets import create_if_missing, captured
 
 
 def main():
@@ -23,10 +24,12 @@ def main():
     assert replicas > 0, "control-plane is already stopped; inspect the prior cutover before resuming"
     assert any(c["image"] == "xscope/control-plane:dev" for c in deployment["spec"]["template"]["spec"]["containers"]), "unexpected image; scoped local cutover only"
     subprocess.run(["docker", "image", "inspect", "xscope/control-plane:dev"], check=True, stdout=subprocess.DEVNULL)
-    backup = Path(os.environ["BUILD_WORKSPACE_DIRECTORY"]) / ".build" / ("billing-backup-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
-    backup.mkdir(mode=0o700)
+    backup = Path(tempfile.mkdtemp(prefix="xscope-private-billing-backup-"))
+    os.chmod(backup, 0o700)
+    assert not backup.resolve().is_relative_to(Path(os.environ["BUILD_WORKSPACE_DIRECTORY"]).resolve())
+    assert not any((p / ".git").exists() for p in (backup.resolve(), *backup.resolve().parents))
     old = [p["metadata"]["name"] for p in json.loads(kubectl("get", "pods", "-l", "app.kubernetes.io/name=control-plane", "-o", "json"))["items"]]
-    print("Stopping control-plane writers before projection cutover; new inference admission will temporarily fail closed. Gateway WAL is retained.", flush=True)
+    print("Stopping control-plane writers before projection cutover; new inference admission will temporarily fail closed. Drain the Gateway before maintenance; historical evidence is retained.", flush=True)
     kubectl("scale", "deployment/control-plane", "--replicas=0")
     for pod in old:
         kubectl("wait", "--for=delete", "pod/" + pod, "--timeout=90s")
@@ -38,6 +41,15 @@ def main():
         output.flush()
         os.fsync(output.fileno())
     print(f"Private business-schema backup saved: {path}", flush=True)
+    create_if_missing("xscope-backend-runtime", {"XSCOPE_EVENT_WORKER_ENABLED": "true"})
+    current = json.loads(kubectl("get", "deployment/control-plane", "-o", "json"))
+    control = next(c for c in current["spec"]["template"]["spec"]["containers"] if c["name"] == "control-plane")
+    env_from = control.get("envFrom", [])
+    if not any(v.get("secretRef", {}).get("name") == "xscope-backend-runtime" for v in env_from):
+        env_from.append({"secretRef": {"name": "xscope-backend-runtime", "optional": True}})
+    captured("patch", "deployment", "control-plane", "--type=strategic", "--patch-file=/dev/stdin", payload={
+        "metadata": {"resourceVersion": current["metadata"]["resourceVersion"]},
+        "spec": {"template": {"spec": {"containers": [{"name": "control-plane", "envFrom": env_from}]}}}})
     kubectl("rollout", "restart", "deployment/control-plane")
     if args.quiesce_only:
         print("Writers stopped and backup complete. Caller must resume the newly built control-plane through its manifests.", flush=True)
@@ -53,6 +65,12 @@ def main():
     projections = kubectl("exec", "statefulset/postgres", "--", "psql", "-U", "xscope", "-d", "keycloak", "-At", "-c",
         "SELECT count(*) FROM information_schema.tables WHERE table_schema='xscope' AND table_name IN ('billing_balances','billing_key_holds','billing_month_spend')")
     assert projections.strip() == "3", "projection migration missing; do not restore old non-projecting writers"
+    reviews = kubectl("exec", "statefulset/postgres", "--", "psql", "-U", "xscope", "-d", "keycloak", "-At", "-c",
+        "SELECT count(*) FROM pg_trigger WHERE tgrelid IN ('xscope.billing_reviews'::regclass,'xscope.billing_review_audit'::regclass) AND NOT tgisinternal AND tgenabled='O'")
+    assert reviews.strip() == "4", "billing evidence/audit immutability triggers missing"
+    features = kubectl("exec", "statefulset/postgres", "--", "psql", "-U", "xscope", "-d", "keycloak", "-At", "-c",
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema='xscope' AND table_name IN ('billing_jobs','billing_effects','operation_audits','member_clusters','cluster_revisions','payment_checkouts','provider_receipts','tax_requests')")
+    assert features.strip() == "8", "backend workflow migrations missing"
     print("PASS exclusive cutover, additive projection tables and paging index ready. Existing financial history, identities, Redis and PVCs retained.", flush=True)
 
 

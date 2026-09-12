@@ -43,6 +43,9 @@ class StreamingIntegrationTest(unittest.TestCase):
         cls.root = Path(cls.temp.name)
         cls.processes = []
         cls.logs = []
+        cls.receipts = {}
+        cls.receipt_traces = {}
+        cls.receipts_lock = threading.Lock()
         cls.snapshot = {"keys": [{"id": "key-test", "tenant_id": "tenant-test", "project_id": "project-test",
             "secret_hash": base64.b64encode(hashlib.sha256(b"test-key").digest()).decode(),
             "scopes": ["chat.completions"], "allowed_models": ["xscope-demo"], "rate_limit_rpm": 600,
@@ -60,7 +63,13 @@ class StreamingIntegrationTest(unittest.TestCase):
                 self.wfile.write(body)
 
             def do_POST(self):
-                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                if self.path != "/usage-events" or self.headers.get("Authorization") != "Bearer test-internal":
+                    self.send_error(403)
+                    return
+                event = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                with cls.receipts_lock:
+                    cls.receipts.setdefault(event["event_id"], event)
+                    cls.receipt_traces[event["event_id"]] = self.headers.get("traceparent")
                 self.send_response(200)
                 self.end_headers()
 
@@ -77,11 +86,12 @@ class StreamingIntegrationTest(unittest.TestCase):
         runtime_port = available_port()
         while runtime_port in (cls.gateway_port, cls.metrics_port):
             runtime_port = available_port()
-        cls.wal = cls.root / "usage.jsonl"
         cls.runtime_log = cls.root / "runtime.log"
+        cls.runtime_port = runtime_port
         canary_port = available_port()
         while canary_port in (runtime_port, cls.gateway_port, cls.metrics_port):
             canary_port = available_port()
+        cls.canary_port = canary_port
         resolver = runfiles.Create()
         runtime_env = dict(os.environ, XSCOPE_RUNTIME_HOST="127.0.0.1",
                            XSCOPE_RUNTIME_PORT=str(runtime_port),
@@ -89,7 +99,7 @@ class StreamingIntegrationTest(unittest.TestCase):
         gateway_env = dict(os.environ,
             XSCOPE_GATEWAY_ADDRESS=f"127.0.0.1:{cls.gateway_port}",
             XSCOPE_METRICS_ADDRESS=f"127.0.0.1:{cls.metrics_port}",
-            XSCOPE_USAGE_WAL=str(cls.wal), XSCOPE_REDIS_URL="",
+            XSCOPE_USAGE_MODE="memory", XSCOPE_BILLING_RESERVATIONS="false", XSCOPE_REDIS_URL="",
             XSCOPE_CONTROL_INTERNAL_URL=f"http://127.0.0.1:{cls.snapshot_server.server_port}", XSCOPE_INTERNAL_TOKEN="test-internal",
             XSCOPE_POLICY_REFRESH_SECONDS="1",
             XSCOPE_SERVING_ENTRY_JSON=json.dumps({"id": "pool-test", "model": "xscope-demo", "revision": "stable-v1", "address": f"127.0.0.1:{runtime_port}"}),
@@ -147,17 +157,8 @@ class StreamingIntegrationTest(unittest.TestCase):
         return connection, connection.getresponse()
 
     def events(self, request_id):
-        if not self.wal.exists():
-            return []
-        result = []
-        for line in self.wal.read_text().splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # A writer can be in the middle of its final append.
-            if event["request_id"] == request_id:
-                result.append(event)
-        return result
+        with self.receipts_lock:
+            return [event for event in self.receipts.values() if event["request_id"] == request_id]
 
     def test_complete_stream_is_incremental_and_metered_once(self):
         request_id = "complete-stream"
@@ -182,6 +183,8 @@ class StreamingIntegrationTest(unittest.TestCase):
         self.assertEqual(len([chunk for chunk in chunks if chunk.get("usage")]), 1)
         event = eventually(lambda: self.events(request_id))[0]
         self.assertEqual(event["status"], "succeeded")
+        self.assertTrue(self.receipt_traces[event["event_id"]].startswith("00-0123456789abcdef0123456789abcdef-"))
+        self.assertNotIn("trace_headers", event)
         self.assertEqual((event["input_tokens"], event["output_tokens"]), (10, 12))
         self.assertEqual(len(self.events(request_id)), 1)
         def metric_recorded():
@@ -233,6 +236,95 @@ class StreamingIntegrationTest(unittest.TestCase):
             response.close()
             connection.close()
         self.assertEqual(eventually(lambda: self.events(request_id))[0]["status"], "succeeded")
+
+    def test_multimodel_catalog_hot_reload_and_large_body(self):
+        original = self.snapshot
+        def entry(model, pool, version):
+            return {"revision": 1, "enabled": True, "default_pool": pool, "model": {
+                "id": model, "display_name": model, "max_context_tokens": 32768,
+                "price_version": version, "input_per_million_tokens": {"currency": "CNY", "amount": 1000},
+                "output_per_million_tokens": {"currency": "CNY", "amount": 3000}}}
+        catalog = {"models": [entry("xscope-demo", "pool-test", "price-one"), entry("second-model", "second-entry", "price-two")],
+            "endpoints": [{"id": "second-entry", "model": "second-model", "revision": "second-revision",
+                "address": f"127.0.0.1:{self.canary_port}"}]}
+        def publish(value):
+            type(self).snapshot = {**original, "catalog": value, "keys": [
+                {**original["keys"][0], "allowed_models": ["xscope-demo", "second-model"]}]}
+        def listed():
+            request = urllib.request.Request(f"http://127.0.0.1:{self.gateway_port}/v1/models",
+                headers={"Authorization": "Bearer test-key"})
+            with urllib.request.urlopen(request, timeout=2) as response:
+                return {m["id"] for m in json.load(response)["data"]}
+        def call(request_id, model, **kwargs):
+            connection, response = self.request(request_id, model=model, stream=False, **kwargs)
+            try:
+                data = response.read()
+                return response.status, response.getheader("x-xscope-pool"), data
+            finally:
+                response.close()
+                connection.close()
+        try:
+            publish(catalog)
+            eventually(lambda: "second-model" in listed())
+            self.assertEqual(call("second-model-ok", "second-model")[:2], (200, "second-entry"))
+            event = eventually(lambda: self.events("second-model-ok"))[0]
+            self.assertEqual((event["model_id"], event["model_revision"], event["price_version"]),
+                ("second-model", "second-revision", "price-two"))
+            self.assertNotIn("request_id=second-model-ok", self.runtime_log.read_text())
+            self.assertEqual(call("large-allowed", "xscope-demo", text="word " * 18000)[:2], (200, "pool-test"))
+            self.assertEqual(eventually(lambda: self.events("large-allowed"))[0]["input_tokens"], 18000)
+            self.assertEqual(call("oversize", "xscope-demo", text="x" * (1 << 20))[0], 413)
+            self.assertFalse(self.events("oversize"))
+            # Body model must not select the default model's canary policy.
+            type(self).snapshot = {**self.snapshot, "route_policies": [{"tenant_id": "tenant-test", "project_id": "project-test",
+                "model": "second-model", "revision": 1, "spec": {"stable_pool": "pool-test", "canary_percent": 0, "headers": []}}]}
+            eventually(lambda: call("waiting-for-model-policy", "second-model")[0] == 503)
+            self.assertEqual(call("wrong-model-pool", "second-model")[0], 503)
+            self.assertFalse(self.events("wrong-model-pool"))
+            publish({**catalog, "models": [catalog["models"][0], {**catalog["models"][1], "enabled": False, "revision": 2}]})
+            eventually(lambda: "second-model" not in listed())
+            self.assertEqual(call("disabled-model", "second-model")[0], 404)
+        finally:
+            type(self).snapshot = original
+            eventually(lambda: "second-model" not in listed())
+
+    def test_zz_default_model_outage_does_not_remove_other_models(self):
+        # Last test deliberately stops the default runtime. A new independent
+        # runtime proves Gateway readiness is no longer tied to that default.
+        other_port = available_port()
+        log = (self.root / "independent-runtime.log").open("wb")
+        self.logs.append(log)
+        process = subprocess.Popen([runfiles.Create().Rlocation(RUNTIME)],
+            env=dict(os.environ, XSCOPE_RUNTIME_HOST="127.0.0.1", XSCOPE_RUNTIME_PORT=str(other_port)),
+            stdout=log, stderr=subprocess.STDOUT)
+        self.processes.append(process)
+        def ready(port):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/readyz", timeout=1) as response:
+                    return response.status == 200
+            except (OSError, urllib.error.URLError):
+                return False
+        eventually(lambda: ready(other_port))
+        original = self.snapshot
+        definition = {"id": "independent", "display_name": "Synthetic independent model", "max_context_tokens": 4096,
+            "price_version": "synthetic-price", "input_per_million_tokens": {"currency": "CNY", "amount": 1},
+            "output_per_million_tokens": {"currency": "CNY", "amount": 2}}
+        type(self).snapshot = {**original, "keys": [{**original["keys"][0], "allowed_models": ["independent"]}],
+            "catalog": {"models": [{"revision": 1, "enabled": True, "default_pool": "independent-entry", "model": definition}],
+                "endpoints": [{"id": "independent-entry", "model": "independent", "revision": "synthetic-revision", "address": f"127.0.0.1:{other_port}"}]}}
+        self.processes[0].terminate()
+        self.processes[0].wait(timeout=3)
+        time.sleep(5.5)  # Allow the old default's background TCP check to fail.
+        self.assertTrue(ready(self.gateway_port))
+        connection, response = self.request("independent-after-outage", model="independent", stream=False)
+        try:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("x-xscope-pool"), "independent-entry")
+            response.read()
+        finally:
+            response.close()
+            connection.close()
+        self.assertEqual(eventually(lambda: self.events("independent-after-outage"))[0]["model_id"], "independent")
 
     def test_route_snapshot_headers_weights_and_fail_closed(self):
         # These are real gateway + two Bazel runtime processes. The snapshot

@@ -1,0 +1,33 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+
+config_setting(name = "mac_arm", constraint_values = ["@platforms//os:macos", "@platforms//cpu:aarch64"])
+config_setting(name = "mac_x64", constraint_values = ["@platforms//os:macos", "@platforms//cpu:x86_64"])
+config_setting(name = "linux_arm", constraint_values = ["@platforms//os:linux", "@platforms//cpu:aarch64"])
+
+alias(
+    name = "gitleaks",
+    actual = select({
+        ":mac_arm": "@gitleaks_darwin_arm64//:gitleaks",
+        ":mac_x64": "@gitleaks_darwin_x64//:gitleaks",
+        ":linux_arm": "@gitleaks_linux_arm64//:gitleaks",
+        "//conditions:default": "@gitleaks_linux_x64//:gitleaks",
+    }),
+)
+
+py_binary(
+    name = "scan",
+    srcs = ["scan.py"],
+    args = ["$(rlocationpath :gitleaks)", "$(rlocationpath :gitleaks.toml)"],
+    data = [":gitleaks", ":gitleaks.toml"],
+    deps = ["@rules_python//python/runfiles"],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "scan_test",
+    srcs = ["scan_test.py", "scan.py"],
+    imports = ["."],
+    args = ["$(rlocationpath :gitleaks)", "$(rlocationpath :gitleaks.toml)"],
+    data = [":gitleaks", ":gitleaks.toml"],
+    deps = ["@rules_python//python/runfiles"],
+)

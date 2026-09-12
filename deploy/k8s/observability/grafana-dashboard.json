@@ -734,7 +734,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (operation, outcome) (increase(xscope_background_events_total{operation=~\"wal_append|usage_queue|usage_export\",outcome=~\"error|full|rejected|retry\"}[5m]))",
+          "expr": "sum by (operation, outcome) (increase(xscope_background_events_total{operation=~\"usage_enqueue|usage_queue|usage_export|billing_pending_monitor\",outcome=~\"error|full|rejected|retry|permanent_failure|drain_timeout\"}[5m]))",
           "legendFormat": "{{operation}} · {{outcome}}"
         }
       ],
@@ -784,7 +784,7 @@
           "sort": "desc"
         }
       },
-      "description": "最近 5 分钟的 WAL、队列和 usage 投递异常增量。计数器未出现时可能没有序列，不能仅由 No data 判断采集正常。"
+      "description": "最近 5 分钟的 HTTP 用量队列、投递和未决监控异常增量。计数器未出现时可能没有序列，不能仅由 No data 判断采集正常。"
     },
     {
       "id": 6,

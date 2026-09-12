@@ -8,14 +8,98 @@ groups:
         annotations:
           summary: "XScope telemetry target is unavailable"
       - alert: XScopeInferenceErrors
-        expr: sum(rate(xscope_http_requests_total{component="gateway",route="/v1/chat/completions",outcome="provider_error"}[5m])) / clamp_min(sum(rate(xscope_http_requests_total{component="gateway",route="/v1/chat/completions"}[5m])), 0.001) > 0.05
+        expr: sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",outcome="provider_error"}[5m])) / clamp_min(sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions"}[5m])), 0.001) > 0.05
         for: 5m
         labels: { severity: warning }
         annotations:
           summary: "Inference provider error ratio exceeds 5%"
       - alert: XScopeUsageDeliveryFailure
-        expr: sum(increase(xscope_background_events_total{operation=~"wal_append|usage_queue|usage_export",outcome=~"error|full|rejected|retry"}[5m])) > 0
+        expr: sum(increase(xscope_background_events_total{operation=~"usage_enqueue|usage_queue|usage_export|billing_pending_monitor",outcome=~"error|full|rejected|retry|permanent_failure|drain_timeout"}[5m])) > 0
         for: 1m
         labels: { severity: critical }
         annotations:
-          summary: "Usage persistence or delivery needs investigation"
+          summary: "Usage delivery or central pending monitoring needs investigation"
+      - alert: XScopeVolatileUsageBacklog
+        expr: max(xscope_usage_queue{kind="oldest_seconds"}) > 15
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Volatile usage delivery is delayed; Pod replacement can lose pending receipts"
+      - alert: XScopeUsageAdmissionBlocked
+        expr: min(xscope_usage_queue{kind="ready"}) == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "A Gateway stopped admission because its volatile queue is full, stale, draining or unhealthy"
+      - alert: XScopePendingMoneyOld
+        expr: max(xscope_billing_pending_oldest_seconds) > 1800
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "A central reservation is over 30 minutes old; investigate evidence or reviewed loss waiver, never auto-release"
+      - alert: XScopeEventDeadJobs
+        expr: max(xscope_event_worker_state{state="dead",kind="jobs"}) > 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Financial event jobs require reviewed recovery; ACK remains unchanged"
+      - alert: XScopeEventBacklogOld
+        expr: max(xscope_event_worker_state{state=~"pending|running",kind="oldest_seconds"}) > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Oldest pending financial event is over five minutes old"
+      - alert: XScopeEventWorkerFailures
+        expr: sum(increase(xscope_background_events_total{operation="event_worker",outcome=~"error|lease_expired"}[10m])) > 3
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Event workers repeatedly fail or lose leases"
+      - alert: XScopeAuditCompletionMissing
+        expr: sum(increase(xscope_background_events_total{operation="audit",outcome="completion_missing"}[5m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "A control mutation has a durable intent but no completion audit; outcome must be checked"
+      - alert: XScopeClusterNack
+        expr: sum(increase(xscope_background_events_total{operation="cluster_delivery",outcome="nack"}[10m])) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "A member cluster rejected desired state; inspect bounded error status"
+  - name: xscope-slo
+    interval: 30s
+    rules:
+      # Initial operational objectives, not contractual promises. Client 4xx
+      # and intentional cancellations are excluded; no traffic is not success.
+      - record: xscope:slo_availability_error_ratio:5m
+        expr: (sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"5..",outcome!="cancelled"}[5m]) or rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",outcome="provider_error"}[5m])) or vector(0)) / sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"2..|5..",outcome!="cancelled"}[5m]))
+      - record: xscope:slo_availability_error_ratio:30m
+        expr: (sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"5..",outcome!="cancelled"}[30m]) or rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",outcome="provider_error"}[30m])) or vector(0)) / sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"2..|5..",outcome!="cancelled"}[30m]))
+      - record: xscope:slo_availability_error_ratio:1h
+        expr: (sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"5..",outcome!="cancelled"}[1h]) or rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",outcome="provider_error"}[1h])) or vector(0)) / sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"2..|5..",outcome!="cancelled"}[1h]))
+      - record: xscope:slo_availability_error_ratio:6h
+        expr: (sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"5..",outcome!="cancelled"}[6h]) or rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",outcome="provider_error"}[6h])) or vector(0)) / sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"2..|5..",outcome!="cancelled"}[6h]))
+      - record: xscope:slo_availability_error_ratio:30d
+        expr: (sum(increase(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"5..",outcome!="cancelled"}[30d]) or increase(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",outcome="provider_error"}[30d])) or vector(0)) / sum(increase(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"2..|5..",outcome!="cancelled"}[30d]))
+      - record: xscope:slo_availability_budget_remaining:30d
+        expr: 1 - xscope:slo_availability_error_ratio:30d / 0.001
+      - record: xscope:slo_first_byte_slow_ratio:5m
+        expr: 1 - sum(rate(xscope_http_first_byte_seconds_bucket{component="gateway",route=~"/v1/(chat/)?completions",le="5"}[5m])) / sum(rate(xscope_http_first_byte_seconds_count{component="gateway",route=~"/v1/(chat/)?completions"}[5m]))
+      - alert: XScopeAvailabilityFastBurn
+        expr: (xscope:slo_availability_error_ratio:1h > 0.0144) and (xscope:slo_availability_error_ratio:5m > 0.0144) and (sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"2..|5..",outcome!="cancelled"}[5m])) > 0)
+        for: 2m
+        labels: { severity: critical, slo: availability_99_9 }
+        annotations:
+          summary: "99.9% availability error budget is burning over 14.4x in both 1h and 5m windows"
+      - alert: XScopeAvailabilitySlowBurn
+        expr: (xscope:slo_availability_error_ratio:6h > 0.006) and (xscope:slo_availability_error_ratio:30m > 0.006) and (sum(rate(xscope_http_requests_total{component="gateway",route=~"/v1/(chat/)?completions",status=~"2..|5..",outcome!="cancelled"}[30m])) > 0)
+        for: 15m
+        labels: { severity: warning, slo: availability_99_9 }
+        annotations:
+          summary: "99.9% availability error budget is burning over 6x in both 6h and 30m windows"
+      - alert: XScopeFirstByteLatency
+        expr: xscope:slo_first_byte_slow_ratio:5m > 0.05
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Over 5% of observed upstream first bytes take longer than five seconds; this is not token-aware TTFT"

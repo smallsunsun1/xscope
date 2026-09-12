@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod billing;
+pub mod catalog;
+pub mod cluster;
 pub mod routing;
+pub mod traffic;
 pub use routing::{PutRoutePolicy, RoutePolicy, RoutePolicySpec, RoutePool};
 
 pub const DEFAULT_MODEL_ID: &str = "xscope-demo";
@@ -123,6 +126,9 @@ pub struct GatewaySnapshot {
     pub generated_at: DateTime<Utc>,
     pub keys: Vec<GatewayKey>,
     pub route_policies: Vec<RoutePolicy>,
+    pub catalog: catalog::CatalogSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traffic: Option<traffic::TrafficSnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -432,8 +438,11 @@ impl ApiKeyRequest {
         if self.expires_at.is_some_and(|expiry| expiry <= now) {
             return Err(DomainError::InvalidExpiry);
         }
-        if !self.scopes.iter().any(|scope| scope == "chat.completions")
-            || self.scopes.iter().any(|scope| scope != "chat.completions")
+        if self.scopes.is_empty()
+            || self
+                .scopes
+                .iter()
+                .any(|scope| !["chat.completions", "completions"].contains(&scope.as_str()))
         {
             return Err(DomainError::InvalidScope);
         }

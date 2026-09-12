@@ -123,14 +123,3 @@ data:
         }
       ]
     }
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: gateway-usage-wal
-  namespace: xscope-system
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 256Mi

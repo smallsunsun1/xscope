@@ -1,6 +1,8 @@
 """Shared local-only helpers for observability migration and restart verification."""
 import contextlib
+import base64
 import json
+import os
 import socket
 import subprocess
 import time
@@ -17,6 +19,22 @@ def local_only():
 
 def kubectl(*args):
     return subprocess.check_output(KUBE + list(args), text=True, timeout=180)
+
+
+def inference_api_key():
+    explicit = os.environ.get("XSCOPE_TEST_API_KEY")
+    if explicit:
+        return explicit
+    # Runtime-only capture: never copy key material into arguments/logs/files.
+    process = subprocess.run(KUBE + ["get", "secret", "xscope-gateway-keys", "-o", "json"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+    if process.returncode:
+        raise RuntimeError("Gateway key Secret unavailable; configure a runtime test key")
+    keys = json.loads(base64.b64decode(json.loads(process.stdout)["data"]["keys.json"]))
+    for key in keys:
+        if key.get("secret") and not key.get("revoked"):
+            return key["secret"]
+    raise RuntimeError("No usable runtime test key in Gateway Secret")
 
 
 def request(url, payload=None, headers=None, method=None):

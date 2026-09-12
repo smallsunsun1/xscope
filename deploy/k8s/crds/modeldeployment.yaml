@@ -72,6 +72,23 @@ spec:
                     arguments:
                       type: array
                       items: { type: string }
+                    health:
+                      type: object
+                      required: [path, startupTimeoutSeconds]
+                      properties:
+                        path:
+                          type: string
+                          minLength: 1
+                          maxLength: 256
+                          pattern: '^/[a-zA-Z0-9/._-]*$'
+                        startupTimeoutSeconds:
+                          type: integer
+                          minimum: 10
+                          maximum: 7200
+                          multipleOf: 5
+                      x-kubernetes-validations:
+                        - rule: "!self.path.startsWith('//')"
+                          message: Runtime health must be a local HTTP path.
                 replicas: { type: integer, minimum: 0, default: 1 }
                 resources:
                   type: object
@@ -91,6 +108,7 @@ spec:
                     - rule: self.maxReplicas >= self.minReplicas
                       message: maxReplicas must be at least minReplicas.
                   properties:
+                    managed: {type: boolean, default: false}
                     minReplicas: { type: integer, minimum: 1, default: 1 }
                     maxReplicas: { type: integer, minimum: 1 }
                     targetPendingRequests: { type: integer, minimum: 1 }

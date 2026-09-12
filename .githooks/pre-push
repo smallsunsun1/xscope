@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+# No remote URL or stdin refs are logged. Fail closed on findings/tool errors.
+exec bazel run //tools/security:scan

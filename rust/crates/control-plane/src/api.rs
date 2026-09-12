@@ -30,6 +30,7 @@ pub struct AppState {
     pub repository: Repository,
     pub config: Arc<Config>,
     pub http: reqwest::Client,
+    pub alipay: Option<Arc<xscope_payments::Alipay>>,
     component_targets: Arc<HashMap<String, String>>,
 }
 
@@ -69,9 +70,10 @@ impl UserContext {
 }
 
 impl AppState {
-    pub fn new(repository: Repository, config: Config) -> Result<Self, reqwest::Error> {
+    pub fn new(repository: Repository, config: Config) -> Result<Self, anyhow::Error> {
         let component_targets = config.component_targets.iter().cloned().collect();
         Ok(Self {
+            alipay: xscope_payments::Alipay::from_env()?.map(Arc::new),
             repository,
             config: Arc::new(config),
             http: reqwest::Client::builder()
@@ -86,6 +88,7 @@ impl AppState {
 pub fn public_router(state: &AppState) -> Router {
     let admin = Router::new()
         .route("/session", get(session))
+        .route("/audit", get(list_operation_audits))
         .route("/users", get(list_users))
         .route(
             "/users/{user_id}/memberships/{tenant_id}",
@@ -93,16 +96,47 @@ pub fn public_router(state: &AppState) -> Router {
         )
         .route("/components/{name}/health", get(component_health))
         .route("/projects", get(list_projects).post(create_project))
+        .route("/clusters", get(list_clusters).post(register_cluster))
+        .route("/clusters/{id}/desired-state", put(put_cluster_desired))
+        .route("/clusters/{id}/credential", post(rotate_cluster_credential))
+        .route("/clusters/{id}/revoke", post(revoke_cluster))
         .route("/route-pools", get(list_route_pools))
+        .route("/model-catalog", get(model_catalog))
+        .route("/model-catalog/{id}", put(put_model))
+        .route("/serving-endpoints", get(serving_endpoint_versions))
+        .route("/managed-pools", get(list_managed_pools).post(bind_pool))
+        .route("/managed-pools/{id}", get(managed_pool_status))
+        .route("/managed-pools/{id}/{action}", post(pool_transition))
+        .route(
+            "/projects/{project_id}/models/{model}/route-policy/acks",
+            get(route_acks),
+        )
+        .route("/serving-endpoints/{id}", put(put_serving_endpoint))
         .route("/route-policies", get(list_route_policies))
         .route(
             "/projects/{project_id}/models/{model}/route-policy",
             put(put_route_policy),
         )
+        .route(
+            "/projects/{project_id}/models/{model}/route-policy/history",
+            get(route_history),
+        )
+        .route(
+            "/projects/{project_id}/models/{model}/route-policy/actions",
+            post(release_action),
+        )
         .route("/api-keys", get(list_api_keys).post(create_api_key))
         .route("/api-keys/{id}", delete(revoke_api_key))
         .route("/quote", get(quote))
         .route("/billing/summary", get(billing_summary))
+        .route(
+            "/billing/accounts/{project_id}/event-worker",
+            get(event_worker_status),
+        )
+        .route(
+            "/billing/accounts/{project_id}/event-worker/retry",
+            post(retry_event_worker),
+        )
         .route(
             "/billing/accounts/{project_id}/position",
             get(console_billing_position),
@@ -112,15 +146,54 @@ pub fn public_router(state: &AppState) -> Router {
             get(console_pending_reservations),
         )
         .route(
+            "/billing/accounts/{project}/reservations/{id}/reviews",
+            get(list_billing_reviews).post(submit_billing_evidence),
+        )
+        .route(
+            "/billing/accounts/{project}/reviews/{id}",
+            get(billing_review_detail),
+        )
+        .route(
+            "/billing/accounts/{project}/reservations/{id}/waivers",
+            post(submit_billing_waiver),
+        )
+        .route(
+            "/billing/accounts/{project}/reviews/{id}/decision",
+            post(decide_billing_review),
+        )
+        .route(
             "/billing/accounts/{project_id}",
             get(get_billing_account).put(update_balance_policy),
         )
         .route("/billing/orders", get(list_orders).post(create_order))
+        .route(
+            "/billing/orders/{id}/alipay/checkout",
+            post(alipay_checkout),
+        )
+        .route("/billing/orders/{id}/alipay/sync", post(alipay_sync))
         .route("/billing/orders/{order_id}/payments", post(capture_payment))
         .route("/billing/payments", get(list_payments))
         .route("/billing/refunds", get(list_refunds).post(create_refund))
+        .route("/billing/alipay/refunds", post(prepare_alipay_refund))
+        .route(
+            "/billing/alipay/refunds/{id}/submit",
+            post(submit_alipay_refund),
+        )
+        .route(
+            "/billing/alipay/refunds/{id}/sync",
+            post(sync_alipay_refund),
+        )
+        .route(
+            "/billing/alipay/refunds/{id}/evidence",
+            post(import_refund_evidence).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)),
+        )
         .route("/billing/ledger", get(list_ledger))
         .route("/billing/invoices", get(list_invoices).post(create_invoice))
+        .route(
+            "/billing/invoices/{id}/tax-request",
+            get(tax_request_status).post(request_tax_invoice),
+        )
+        .route("/billing/capabilities", get(payment_capabilities))
         .route("/billing/reconciliation", post(reconcile))
         .route("/model-deployments", get(cluster_proxy).post(cluster_proxy))
         .route(
@@ -139,6 +212,10 @@ pub fn public_router(state: &AppState) -> Router {
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/v1/models", get(models))
+        .route(
+            "/payments/alipay/notify",
+            post(alipay_notify).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .nest("/admin/v1", admin);
     let mut router = Router::new()
         .merge(api.clone())
@@ -163,6 +240,16 @@ pub fn internal_router(state: AppState) -> Router {
         .route("/internal/v1/gateway/snapshot", get(gateway_snapshot))
         .route("/internal/v1/usage-events", post(record_usage))
         .route("/internal/v1/billing/reservations", post(reserve_money))
+        .route(
+            "/internal/v1/billing/projects/{project}/reservations/{id}/unresolved",
+            post(unresolved_money),
+        )
+        .route("/internal/v1/billing/workers/claim", post(claim_event_job))
+        .route(
+            "/internal/v1/billing/workers/complete",
+            post(complete_event_job),
+        )
+        .route("/internal/v1/billing/workers/fail", post(fail_event_job))
         .route(
             "/internal/v1/billing/projects/{project}/projections/check",
             get(projection_check),
@@ -199,9 +286,137 @@ pub fn internal_router(state: AppState) -> Router {
             "/internal/v1/billing/projects/{project}/consumers/{consumer}/ack",
             post(ack_billing_events),
         )
+        .route("/internal/v1/gateway/traffic-report", post(traffic_report))
         .route_layer(middleware::from_fn_with_state(state.clone(), internal_auth))
+        // These handlers verify the cluster-specific credential themselves.
+        // A Gateway internal token is deliberately insufficient here.
+        .route("/internal/v1/clusters/{id}/poll", post(poll_cluster))
+        .route("/internal/v1/clusters/{id}/report", post(report_cluster))
+        .route(
+            "/internal/v1/clusters/{id}/observations",
+            get(observation_tasks).post(observe_pool),
+        )
         .with_state(state)
         .layer(middleware::from_fn(observe_http))
+}
+
+fn platform_admin(state: &AppState, context: &UserContext) -> ServiceResult<()> {
+    if context.auth_disabled
+        || state
+            .config
+            .platform_admin_subjects
+            .contains(&context.user.external_subject)
+    {
+        Ok(())
+    } else {
+        Err(ServiceError::Forbidden)
+    }
+}
+async fn list_clusters(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(state.repository.list_clusters().await?))
+}
+
+async fn list_operation_audits(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Query(query): Query<crate::audit::AuditQuery>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(state.repository.list_operation_audits(query).await?))
+}
+async fn register_cluster(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Json(request): Json<crate::clusters::RegisterCluster>,
+) -> ServiceResult<(StatusCode, Json<Value>)> {
+    platform_admin(&state, &context)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            state
+                .repository
+                .register_cluster(request, &context.user.id)
+                .await?,
+        ),
+    ))
+}
+async fn put_cluster_desired(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+    Json(request): Json<xscope_domain::cluster::DesiredState>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(
+        state
+            .repository
+            .put_cluster_desired(&id, request, &context.user.id)
+            .await?,
+    ))
+}
+async fn rotate_cluster_credential(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::clusters::RotateCredential>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(
+        state
+            .repository
+            .rotate_cluster_credential(&id, request, &context.user.id)
+            .await?,
+    ))
+}
+async fn revoke_cluster(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(
+        state
+            .repository
+            .revoke_cluster(&id, &context.user.id)
+            .await?,
+    ))
+}
+fn cluster_bearer(headers: &HeaderMap) -> ServiceResult<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| token.len() == 43)
+        .ok_or(ServiceError::Unauthorized)
+}
+async fn poll_cluster(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        state
+            .repository
+            .poll_cluster(&id, cluster_bearer(&headers)?)
+            .await?,
+    ))
+}
+async fn report_cluster(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<xscope_domain::cluster::ClusterReport>,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        state
+            .repository
+            .report_cluster(&id, cluster_bearer(&headers)?, request)
+            .await?,
+    ))
 }
 
 async fn projection_check(
@@ -235,6 +450,25 @@ async fn reserve_money(
     Json(request): Json<crate::billing::ReserveRequest>,
 ) -> ServiceResult<Json<xscope_entities::billing_reservation::Model>> {
     Ok(Json(state.repository.reserve_money(request).await?))
+}
+
+async fn claim_event_job(
+    State(state): State<AppState>,
+    Json(request): Json<crate::event_worker::ClaimRequest>,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(state.repository.claim_event_job(request).await?))
+}
+async fn complete_event_job(
+    State(state): State<AppState>,
+    Json(request): Json<crate::event_worker::Lease>,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(state.repository.complete_event_job(request).await?))
+}
+async fn fail_event_job(
+    State(state): State<AppState>,
+    Json(request): Json<crate::event_worker::FailRequest>,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(state.repository.fail_event_job(request).await?))
 }
 async fn money_reservation(
     State(state): State<AppState>,
@@ -356,8 +590,53 @@ async fn ready(State(state): State<AppState>) -> ServiceResult<Json<Value>> {
     Ok(Json(json!({"status": "ready"})))
 }
 
-async fn models(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({"object": "list", "data": state.repository.models()}))
+async fn models(State(state): State<AppState>) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        json!({"object": "list", "data": state.repository.models().await?}),
+    ))
+}
+
+async fn model_catalog(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(json!({"data": state.repository.catalog().await?})))
+}
+async fn put_model(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+    Json(request): Json<xscope_domain::catalog::PutModel>,
+) -> ServiceResult<Json<xscope_domain::catalog::CatalogModel>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(state.repository.put_model(&id, request).await?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutServingEndpoint {
+    expected_generation: i64,
+    endpoint: xscope_domain::catalog::ServingEndpoint,
+}
+async fn serving_endpoint_versions(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(state.repository.serving_endpoint_versions().await?))
+}
+async fn put_serving_endpoint(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+    Json(request): Json<PutServingEndpoint>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    let generation = state
+        .repository
+        .put_serving_endpoint(&id, request.expected_generation, request.endpoint)
+        .await?;
+    Ok(Json(json!({"id":id,"generation":generation})))
 }
 
 async fn session(Extension(context): Extension<UserContext>) -> Json<PlatformUser> {
@@ -424,8 +703,10 @@ async fn create_project(
     Ok((StatusCode::CREATED, Json(project)))
 }
 
-async fn list_route_pools(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({"object": "list", "data": state.config.route_pools}))
+async fn list_route_pools(State(state): State<AppState>) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        json!({"object": "list", "data": state.repository.route_pools(&state.config.route_pools).await?}),
+    ))
 }
 
 async fn list_route_policies(
@@ -452,9 +733,13 @@ async fn put_route_policy(
     if !context.can_manage(&project.tenant_id) {
         return Err(ServiceError::Forbidden);
     }
+    let pools = state
+        .repository
+        .route_pools(&state.config.route_pools)
+        .await?;
     let policy = state
         .repository
-        .put_route_policy(&project, &model, request, &state.config.route_pools)
+        .put_route_policy(&project, &model, request, &pools, &context.user.id, "put")
         .await?;
     tracing::info!(
         project_id,
@@ -464,6 +749,44 @@ async fn put_route_policy(
         "route policy updated"
     );
     Ok(Json(policy))
+}
+
+async fn route_history(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path((project_id, model)): Path<(String, String)>,
+    Query(query): Query<crate::releases::HistoryQuery>,
+) -> ServiceResult<Json<Value>> {
+    let project = state.repository.get_project(&project_id).await?;
+    require_tenant(&context, &project.tenant_id)?;
+    Ok(Json(
+        state
+            .repository
+            .route_history(&project_id, &model, query)
+            .await?,
+    ))
+}
+
+async fn release_action(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path((project_id, model)): Path<(String, String)>,
+    Json(action): Json<xscope_domain::routing::ReleaseAction>,
+) -> ServiceResult<Json<xscope_domain::RoutePolicy>> {
+    let project = state.repository.get_project(&project_id).await?;
+    if !context.can_manage(&project.tenant_id) {
+        return Err(ServiceError::Forbidden);
+    }
+    let pools = state
+        .repository
+        .route_pools(&state.config.route_pools)
+        .await?;
+    Ok(Json(
+        state
+            .repository
+            .release_action(&project, &model, action, &pools, &context.user.id)
+            .await?,
+    ))
 }
 
 async fn list_api_keys(
@@ -520,11 +843,12 @@ async fn quote(
     State(state): State<AppState>,
     Query(query): Query<QuoteQuery>,
 ) -> ServiceResult<Json<xscope_domain::Quote>> {
-    Ok(Json(state.repository.quote(
-        &query.model,
-        query.input_tokens,
-        query.output_tokens,
-    )?))
+    Ok(Json(
+        state
+            .repository
+            .quote(&query.model, query.input_tokens, query.output_tokens)
+            .await?,
+    ))
 }
 
 #[derive(Default, Deserialize)]
@@ -597,6 +921,38 @@ async fn get_billing_account(
     Ok(Json(state.repository.billing_account(&project_id).await?))
 }
 
+async fn event_worker_status(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(project_id): Path<String>,
+) -> ServiceResult<Json<Value>> {
+    authorize_project_owner(&state.repository, &context, &project_id).await?;
+    let account = state.repository.billing_account(&project_id).await?;
+    Ok(Json(state.repository.event_job_status(&account.id).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetryEventJob {
+    reason: String,
+}
+
+async fn retry_event_worker(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(project_id): Path<String>,
+    Json(request): Json<RetryEventJob>,
+) -> ServiceResult<Json<Value>> {
+    authorize_project_owner(&state.repository, &context, &project_id).await?;
+    let account = state.repository.billing_account(&project_id).await?;
+    Ok(Json(
+        state
+            .repository
+            .retry_event_job(&account.id, &context.user.id, &request.reason)
+            .await?,
+    ))
+}
+
 async fn console_billing_position(
     State(state): State<AppState>,
     Extension(context): Extension<UserContext>,
@@ -612,7 +968,7 @@ async fn console_pending_reservations(
     Path(project_id): Path<String>,
     Query(request): Query<crate::billing_feed::PendingRequest>,
 ) -> ServiceResult<Json<Value>> {
-    authorize_project_owner(&state.repository, &context, &project_id).await?;
+    authorize_billing_review_read(&state, &context, &project_id).await?;
     let page = state
         .repository
         .pending_reservations(&project_id, request)
@@ -626,9 +982,143 @@ async fn console_pending_reservations(
         "id": row["id"], "request_id": row["request_id"], "api_key_id": row["api_key_id"],
         "state": row["state"], "created_at": row["created_at"], "updated_at": row["updated_at"],
         "reserved_microunits": row["reserved_microunits"].as_i64().map(|v| v.to_string()),
+        "unresolved_reason": row["completion"]["reason"].as_str().filter(|reason| matches!(*reason, "usage_missing" | "usage_over_limit")),
     })).collect();
     Ok(Json(
-        json!({"data": data, "next": page["next"], "created_before": page["created_before"], "requires_usage_evidence": true}),
+        json!({"data": data, "next": page["next"], "created_before": page["created_before"], "requires_usage_evidence": true,
+            "resolution_options": ["usage_evidence", "reviewed_loss_waiver"]}),
+    ))
+}
+
+fn is_billing_reviewer(state: &AppState, context: &UserContext) -> bool {
+    !context.auth_disabled
+        && state
+            .config
+            .billing_reviewer_subjects
+            .contains(&context.user.external_subject)
+}
+
+async fn authorize_billing_review_read(
+    state: &AppState,
+    context: &UserContext,
+    project: &str,
+) -> ServiceResult<()> {
+    if is_billing_reviewer(state, context) {
+        return Ok(());
+    }
+    authorize_project_owner(&state.repository, context, project).await
+}
+
+async fn submit_billing_evidence(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path((project, id)): Path<(String, String)>,
+    Json(request): Json<crate::billing_review::EvidenceRequest>,
+) -> ServiceResult<Json<Value>> {
+    if context.auth_disabled {
+        return Err(ServiceError::Forbidden);
+    }
+    authorize_project_owner(&state.repository, &context, &project).await?;
+    Ok(Json(
+        state
+            .repository
+            .submit_billing_evidence(
+                &project,
+                &id,
+                &context.user.id,
+                &context.user.external_subject,
+                request,
+            )
+            .await?,
+    ))
+}
+
+async fn submit_billing_waiver(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path((project, id)): Path<(String, String)>,
+    Json(request): Json<crate::billing_review::WaiverRequest>,
+) -> ServiceResult<Json<Value>> {
+    // Loss waivers are an operator decision, never a customer self-refund API.
+    if !is_billing_reviewer(&state, &context) {
+        return Err(ServiceError::Forbidden);
+    }
+    Ok(Json(
+        state
+            .repository
+            .submit_billing_waiver(
+                &project,
+                &id,
+                &context.user.id,
+                &context.user.external_subject,
+                request,
+            )
+            .await?,
+    ))
+}
+
+async fn unresolved_money(
+    State(state): State<AppState>,
+    Path((project, id)): Path<(String, String)>,
+    Json(request): Json<xscope_domain::billing::UnresolvedRequest>,
+) -> ServiceResult<Json<xscope_entities::billing_reservation::Model>> {
+    Ok(Json(
+        state
+            .repository
+            .unresolved_money(&project, &id, request)
+            .await?,
+    ))
+}
+
+async fn list_billing_reviews(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path((project, id)): Path<(String, String)>,
+    Query(request): Query<crate::billing_review::ListRequest>,
+) -> ServiceResult<Json<Value>> {
+    authorize_billing_review_read(&state, &context, &project).await?;
+    Ok(Json(
+        state
+            .repository
+            .billing_reviews(&project, &id, request)
+            .await?,
+    ))
+}
+
+async fn billing_review_detail(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path((project, id)): Path<(String, String)>,
+) -> ServiceResult<Json<Value>> {
+    authorize_billing_review_read(&state, &context, &project).await?;
+    Ok(Json(
+        state
+            .repository
+            .billing_review_detail(&project, &id)
+            .await?,
+    ))
+}
+
+async fn decide_billing_review(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path((project, id)): Path<(String, String)>,
+    Json(request): Json<crate::billing_review::DecisionRequest>,
+) -> ServiceResult<Json<Value>> {
+    if !is_billing_reviewer(&state, &context) {
+        return Err(ServiceError::Forbidden);
+    }
+    Ok(Json(
+        state
+            .repository
+            .decide_billing_review(
+                &project,
+                &id,
+                &context.user.id,
+                &context.user.external_subject,
+                request,
+            )
+            .await?,
     ))
 }
 
@@ -683,6 +1173,10 @@ async fn capture_payment(
     headers: HeaderMap,
     Json(request): Json<CapturePaymentRequest>,
 ) -> ServiceResult<(StatusCode, Json<xscope_domain::Payment>)> {
+    // This endpoint is a development fixture, never proof of external payment.
+    if state.config.console_auth || state.alipay.is_some() || request.provider != "manual-test" {
+        return Err(ServiceError::Forbidden);
+    }
     let order = state
         .repository
         .list_orders()
@@ -701,6 +1195,71 @@ async fn capture_payment(
                 .await?,
         ),
     ))
+}
+
+fn alipay_provider(state: &AppState) -> ServiceResult<&xscope_payments::Alipay> {
+    state
+        .alipay
+        .as_deref()
+        .ok_or_else(|| ServiceError::Dependency("Alipay is not configured".into()))
+}
+async fn alipay_checkout(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+) -> ServiceResult<Json<Value>> {
+    let order = state.repository.payment_order(&id).await?;
+    require_tenant_owner(&context, &order.tenant_id)?;
+    Ok(Json(
+        state
+            .repository
+            .alipay_checkout(&id, alipay_provider(&state)?)
+            .await?,
+    ))
+}
+async fn alipay_sync(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+) -> ServiceResult<Json<Value>> {
+    let order = state.repository.payment_order(&id).await?;
+    require_tenant_owner(&context, &order.tenant_id)?;
+    let provider = alipay_provider(&state)?;
+    let trade = provider
+        .query(&id)
+        .await
+        .map_err(crate::payment_service::provider_error)?;
+    Ok(Json(
+        state
+            .repository
+            .accept_alipay_trade(provider, trade)
+            .await?,
+    ))
+}
+async fn alipay_notify(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ServiceResult<&'static str> {
+    if body.len() > 64 * 1024
+        || !headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("application/x-www-form-urlencoded"))
+    {
+        return Err(ServiceError::Invalid(
+            "invalid payment notification format".into(),
+        ));
+    }
+    let provider = alipay_provider(&state)?;
+    let trade = provider
+        .verify_notification(&body)
+        .map_err(crate::payment_service::provider_error)?;
+    state
+        .repository
+        .accept_alipay_trade(provider, trade)
+        .await?;
+    Ok("success") // Only after durable evidence/payment transaction commit.
 }
 
 async fn list_payments(
@@ -790,6 +1349,73 @@ async fn create_refund(
     ))
 }
 
+async fn prepare_alipay_refund(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Json(request): Json<CreateRefundRequest>,
+) -> ServiceResult<Json<Value>> {
+    use sea_orm::EntityTrait;
+    let payment = xscope_entities::payment::Entity::find_by_id(&request.payment_id)
+        .one(&state.repository.db)
+        .await?
+        .ok_or(ServiceError::NotFound)?;
+    let order = state.repository.payment_order(&payment.order_id).await?;
+    require_tenant_owner(&context, &order.tenant_id)?;
+    Ok(Json(
+        state
+            .repository
+            .prepare_alipay_refund(request, alipay_provider(&state)?)
+            .await?,
+    ))
+}
+async fn submit_alipay_refund(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+) -> ServiceResult<Json<Value>> {
+    alipay_refund_action(state, context, id, true).await
+}
+async fn sync_alipay_refund(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+) -> ServiceResult<Json<Value>> {
+    alipay_refund_action(state, context, id, false).await
+}
+
+async fn import_refund_evidence(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> ServiceResult<Json<Value>> {
+    let payment = state.repository.refund_payment(&id).await?;
+    let order = state.repository.payment_order(&payment.order_id).await?;
+    require_tenant_owner(&context, &order.tenant_id)?;
+    Ok(Json(
+        state
+            .repository
+            .import_refund_evidence(&id, &body, alipay_provider(&state)?)
+            .await?,
+    ))
+}
+async fn alipay_refund_action(
+    state: AppState,
+    context: UserContext,
+    id: String,
+    submit: bool,
+) -> ServiceResult<Json<Value>> {
+    let payment = state.repository.refund_payment(&id).await?;
+    let order = state.repository.payment_order(&payment.order_id).await?;
+    require_tenant_owner(&context, &order.tenant_id)?;
+    Ok(Json(
+        state
+            .repository
+            .alipay_refund_operation(&id, alipay_provider(&state)?, submit)
+            .await?,
+    ))
+}
+
 async fn list_ledger(
     State(state): State<AppState>,
     Extension(context): Extension<UserContext>,
@@ -834,6 +1460,33 @@ async fn create_invoice(
     ))
 }
 
+async fn payment_capabilities(State(state): State<AppState>) -> Json<Value> {
+    Json(
+        json!({"alipay":{"configured":state.alipay.is_some(),"environment":state.alipay.as_ref().map(|p|p.environment()),"currency":"CNY","sandbox_credits_balance":false},"tax":{"jurisdiction":"CN","provider_configured":false,"issuance_enabled":false},"invoice_records":"billing_statements_not_tax_invoices"}),
+    )
+}
+async fn tax_request_status(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+) -> ServiceResult<Json<Value>> {
+    let statement = state.repository.statement(&id).await?;
+    require_tenant_owner(&context, &statement.tenant_id)?;
+    Ok(Json(state.repository.tax_request_status(&id).await?))
+}
+async fn request_tax_invoice(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::tax::TaxRequest>,
+) -> ServiceResult<Json<Value>> {
+    let statement = state.repository.statement(&id).await?;
+    require_tenant_owner(&context, &statement.tenant_id)?;
+    Ok(Json(
+        state.repository.request_tax_invoice(&id, request).await?,
+    ))
+}
+
 async fn reconcile(
     State(state): State<AppState>,
     Extension(context): Extension<UserContext>,
@@ -845,8 +1498,118 @@ async fn reconcile(
 
 async fn gateway_snapshot(
     State(state): State<AppState>,
+    Query(query): Query<GatewayQuery>,
 ) -> ServiceResult<Json<xscope_domain::GatewaySnapshot>> {
-    Ok(Json(state.repository.gateway_snapshot().await?))
+    Ok(Json(if let Some(id) = query.session {
+        state.repository.traffic_snapshot(&id).await?
+    } else {
+        state.repository.gateway_snapshot().await?
+    }))
+}
+
+#[derive(Deserialize)]
+struct GatewayQuery {
+    session: Option<String>,
+}
+async fn route_acks(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path((project, model)): Path<(String, String)>,
+) -> ServiceResult<Json<Value>> {
+    let project = state.repository.get_project(&project).await?;
+    if !context.can_manage(&project.tenant_id) {
+        return Err(ServiceError::Forbidden);
+    }
+    Ok(Json(
+        state.repository.route_acks(&project.id, &model).await?,
+    ))
+}
+
+async fn traffic_report(
+    State(state): State<AppState>,
+    Json(report): Json<xscope_domain::traffic::TrafficReport>,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(state.repository.traffic_report(report).await?))
+}
+async fn list_managed_pools(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+) -> ServiceResult<Json<Value>> {
+    use sea_orm::{EntityTrait, QueryOrder, QuerySelect};
+    platform_admin(&state, &context)?;
+    let rows = xscope_entities::managed_pool::Entity::find()
+        .order_by_asc(xscope_entities::managed_pool::Column::Id)
+        .limit(1000)
+        .all(&state.repository.db)
+        .await?;
+    Ok(Json(
+        json!({"data":rows.into_iter().map(|r| json!({"id":r.id,"cluster_id":r.cluster_id,"deployment":r.deployment,"generation":r.generation,"state":r.state})).collect::<Vec<_>>()}),
+    ))
+}
+async fn bind_pool(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Json(request): Json<xscope_domain::traffic::PoolBinding>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(
+        state
+            .repository
+            .bind_pool(request, &context.user.id, &state.config.route_pools)
+            .await?,
+    ))
+}
+async fn managed_pool_status(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(state.repository.managed_pool_status(&id).await?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PoolTransition {
+    expected_generation: i64,
+}
+async fn pool_transition(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path((id, action)): Path<(String, String)>,
+    Json(request): Json<PoolTransition>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(
+        state
+            .repository
+            .pool_transition(&id, request.expected_generation, &action, &context.user.id)
+            .await?,
+    ))
+}
+async fn observation_tasks(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        state
+            .repository
+            .observation_tasks(&id, cluster_bearer(&headers)?)
+            .await?,
+    ))
+}
+async fn observe_pool(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(report): Json<xscope_domain::traffic::PoolObservation>,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        state
+            .repository
+            .observe_pool(&id, cluster_bearer(&headers)?, report)
+            .await?,
+    ))
 }
 
 async fn record_usage(
@@ -1005,11 +1768,62 @@ async fn console_identity(
             default_role,
         )
         .await?;
+    let mutation = matches!(
+        *request.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or("unmatched", |route| route.as_str())
+        .to_owned();
+    let actor = user.id.clone();
+    let intent = if mutation {
+        Some(
+            state
+                .repository
+                .audit_operation(
+                    &actor,
+                    "console.intent",
+                    &route,
+                    json!({"method":request.method().as_str()}),
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
     request.extensions_mut().insert(UserContext {
         user,
         auth_disabled,
     });
-    Ok(next.run(request).await)
+    let mut response = next.run(request).await;
+    // API-key/cluster credentials and financial responses must not be cached.
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Some(intent) = intent {
+        if state
+            .repository
+            .audit_operation(
+                &actor,
+                "console.completed",
+                &route,
+                json!({"intent_id":intent,"status":response.status().as_u16()}),
+            )
+            .await
+            .is_err()
+        {
+            // The operation may already be committed. Never misreport it as a
+            // rollback; retain the durable intent and expose an audit-gap alert.
+            xscope_telemetry::background_event("audit", "completion_missing");
+            tracing::error!("console completion audit unavailable; durable intent retained");
+        }
+        if let Ok(value) = intent.parse() {
+            response.headers_mut().insert("x-xscope-audit-id", value);
+        }
+    }
+    Ok(response)
 }
 
 async fn internal_auth(

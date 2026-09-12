@@ -14,7 +14,6 @@ bytes.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
 http.workspace = true
-nix.workspace = true
 pingora-core.workspace = true
 pingora-error.workspace = true
 pingora-http.workspace = true

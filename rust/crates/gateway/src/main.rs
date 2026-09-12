@@ -26,12 +26,8 @@ fn run() -> Result<()> {
     let _telemetry =
         xscope_telemetry::init("xscope-gateway").context("initialize gateway telemetry")?;
     let settings = Settings::from_env().context("load gateway configuration")?;
-    let storage_settings = xscope_gateway::storage::StorageSettings::from_env()
-        .context("load gateway WAL storage settings")?;
-    let storage = xscope_gateway::storage::StorageBudget::new(
-        std::path::Path::new(&settings.usage_wal),
-        storage_settings,
-    );
+    let delivery_settings =
+        xscope_gateway::delivery::Settings::from_env().context("load usage delivery settings")?;
     let keys = DynamicKeySet::new(&settings.api_keys);
     if keys.is_empty() {
         tracing::warn!(
@@ -52,6 +48,10 @@ fn run() -> Result<()> {
     }
 
     let mut server = Server::new(Some(Opt::default())).context("create Pingora server")?;
+    let configuration = std::sync::Arc::get_mut(&mut server.configuration)
+        .context("configure Pingora graceful shutdown")?;
+    configuration.grace_period_seconds = Some(delivery_settings.grace_seconds);
+    configuration.graceful_shutdown_timeout_seconds = Some(5);
     server.bootstrap();
     let mut transports = HashMap::new();
     for pool in std::iter::once(&settings.serving).chain(&settings.additional_serving) {
@@ -86,40 +86,44 @@ fn run() -> Result<()> {
 
     let billing = if settings.billing_reservations {
         Some(
-            BillingAdmission::open(
-                std::path::Path::new(&settings.usage_wal),
+            BillingAdmission::new(
                 settings.control_internal_url.clone(),
                 settings.internal_token.clone(),
                 settings.model_context_tokens,
                 settings.price_version.clone(),
-                storage.clone(),
             )
-            .context("open billing reservation WAL")?,
+            .context("initialize HTTP admission")?,
         )
     } else {
         None
     };
-    let usage = UsageSink::open(
-        &settings.usage_wal,
+    let report_url = format!(
+        "{}/usage-events",
+        settings.control_internal_url.trim_end_matches('/')
+    );
+    let queue = xscope_gateway::delivery::Queue::start(
+        delivery_settings,
+        report_url,
+        settings.internal_token,
+    )
+    .context("initialize volatile HTTP reporting")?;
+    server.add_service(background_service(
+        "usage admission drain",
+        xscope_gateway::delivery::Drain(queue.clone()),
+    ));
+    tracing::warn!(
+        "usage reporting is volatile: abrupt process/Pod loss requires central pending review"
+    );
+    let usage = UsageSink::new(
+        queue.clone(),
         settings.region,
         settings.model_revision,
         settings.price_version,
-        if settings.control_internal_url.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "{}/usage-events",
-                settings.control_internal_url.trim_end_matches('/')
-            )
-        },
-        settings.internal_token,
-        storage,
-    )
-    .context("open usage event WAL")?;
+    );
     let gateway = Gateway {
         transports,
         serving: settings.serving,
-        keys,
+        keys: keys.clone(),
         quota,
         usage,
         billing,
@@ -128,5 +132,10 @@ fn run() -> Result<()> {
     let mut proxy = http_proxy_service(&server.configuration, gateway);
     proxy.add_tcp(&settings.listen);
     server.add_service(proxy);
-    server.run_forever();
+    // Unlike run_forever(), run() returns instead of process::exit(), allowing
+    // the HTTP outbox and telemetry to drain after request runtimes stop.
+    server.run(Default::default());
+    keys.finish();
+    queue.finish();
+    Ok(())
 }

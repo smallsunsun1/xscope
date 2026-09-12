@@ -100,6 +100,7 @@ async fn main() -> Result<()> {
                             .owns(Api::<Service>::all(client.clone()), watcher::Config::default())
                             .owns(Api::<Hpa>::all(client.clone()), watcher::Config::default())
                             .owns(Api::<Pdb>::all(client.clone()), watcher::Config::default())
+                            .owns(Api::<xscope_kubernetes::recommendation::ModelScale>::all(client.clone()), watcher::Config::default())
                             .owns(Api::<InferencePool>::all(client), watcher::Config::default())
                             .run(reconcile, error_policy, context)
                             .for_each(|result| async { if let Err(error) = result { tracing::warn!(%error,"controller stream error"); } }).await;

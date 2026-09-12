@@ -16,3 +16,18 @@ __pycache__/
 /.rules_rust_analyzer/
 /.vscode/.rules_rust_analyzer/
 xscope.code-workspace
+
+# Defense-in-depth only. Real secrets/configuration belong outside the workspace.
+.env
+.env.*
+!.env.example
+*.private.json
+*.private.yaml
+*.private.yml
+*.key
+*.pem
+*.p12
+*.pfx
+/.secrets/
+/secrets/
+/gitleaks-report*

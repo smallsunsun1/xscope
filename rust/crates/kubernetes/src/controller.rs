@@ -104,7 +104,10 @@ pub fn desired(
                         {"name":"XSCOPE_MODEL_REVISION","value":model.spec.model.revision},
                         {"name":"XSCOPE_MODEL_URI","value":model.spec.model.uri},
                         {"name":"XSCOPE_MODEL_CHECKSUM","value":model.spec.model.checksum}],
-                    "readinessProbe":{"httpGet":{"path":"/readyz","port":"http"}}}]
+                    "startupProbe":{"httpGet":{"path":model.spec.runtime.health.path,"port":"http"},
+                        "periodSeconds":5,"timeoutSeconds":2,"failureThreshold":model.spec.runtime.health.startup_timeout_seconds / 5},
+                    "readinessProbe":{"httpGet":{"path":model.spec.runtime.health.path,"port":"http"},
+                        "periodSeconds":5,"timeoutSeconds":2,"failureThreshold":2}}]
             }}}
     }))?;
     let service = serde_json::from_value(json!({
@@ -206,6 +209,10 @@ async fn reconcile_inner(model: &ModelDeployment, context: &Context) -> Result<A
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(",");
+    // Create the recommendation before KEDA references it. Never copy its
+    // spec.replicas into the Runtime here; the control plane owns that decision.
+    crate::recommendation::sync(context.client.clone(), model,
+        existing.as_ref().and_then(|d|d.spec.as_ref()).and_then(|s|s.replicas).unwrap_or(model.spec.replicas), &selector).await?;
     let service_port = service
         .spec
         .as_ref()

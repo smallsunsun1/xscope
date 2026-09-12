@@ -1,7 +1,6 @@
-//! A single admission worker owns the intent WAL. Recovery may release an
+//! The control plane owns durable holds. Recovery may release an
 //! undispatched hold, but can NEVER grant permission to replay inference.
 use std::io;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -13,8 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use xscope_domain::billing::ReserveRequest;
 
-use crate::segments::Journal;
-use crate::storage::{StorageBudget, StoragePermit};
+use crate::delivery::Permit;
 
 pub struct BillingAdmission {
     sender: SyncSender<Command>,
@@ -23,7 +21,7 @@ pub struct BillingAdmission {
     pub price_version: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct Ticket {
     pub id: String,
     pub project_id: String,
@@ -31,16 +29,13 @@ pub(crate) struct Ticket {
     pub output_token_limit: i64,
 }
 
-#[derive(Deserialize, Serialize)]
 struct Intent {
-    version: u32,
     request: ReserveRequest,
-    #[serde(default, with = "crate::usage::trace_context")]
     trace_headers: http::HeaderMap,
 }
 
 struct Command {
-    _space: Arc<StoragePermit>,
+    _permit: Arc<Permit>,
     intent: Intent,
     reply: oneshot::Sender<Result<(), u16>>,
 }
@@ -63,85 +58,48 @@ enum Decision {
 }
 
 impl BillingAdmission {
-    /// Open the admission journal and reconcile unfinished intents before readiness.
-    ///
-    /// # Errors
-    /// Returns an error if durable storage cannot be opened exclusively.
-    pub fn open(
-        usage_path: &Path,
+    /// Volatile admission: the control plane is the authority for every hold.
+    /// Failed/abandoned HTTP attempts are reconciled once; unrecoverable intents
+    /// remain visible in the central pending list, never replayed as inference.
+    pub fn new(
         base: String,
         token: String,
         context_tokens: i64,
         price_version: String,
-        storage: Arc<StorageBudget>,
     ) -> io::Result<Self> {
-        let mut path = usage_path.as_os_str().to_owned();
-        path.push(".reservations.jsonl");
-        let journal = Journal::open(Path::new(&path), storage)?;
-        let healthy = Arc::new(AtomicBool::new(false));
+        let protocol = Protocol {
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .timeout(Duration::from_secs(3))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|_| io::Error::other("admission HTTP client initialization failed"))?,
+            base: base.trim_end_matches('/').into(),
+            token,
+        };
+        let healthy = Arc::new(AtomicBool::new(true));
         let health = healthy.clone();
         let (sender, receiver) = mpsc::sync_channel::<Command>(64);
         thread::spawn(move || {
-            let result = (|| -> io::Result<()> {
-                let protocol = Protocol {
-                    client: Client::builder()
-                        .connect_timeout(Duration::from_secs(2))
-                        .timeout(Duration::from_secs(3))
-                        .redirect(reqwest::redirect::Policy::none())
-                        .build()
-                        .map_err(io::Error::other)?,
-                    base: base.trim_end_matches('/').into(),
-                    token,
-                };
-                let mut journal = journal;
-                loop {
-                    // No live request owns these records: startup, failed HTTP,
-                    // cancelled caller, or lost response. Never dispatch here.
-                    while let Some(record) = journal.next()? {
-                        let intent: Intent = serde_json::from_slice(&record.bytes)?;
-                        if intent.version != 1 {
-                            return Err(io::Error::other("unsupported admission WAL version"));
-                        }
-                        health.store(false, Ordering::Release);
-                        if let Err(status) = protocol.recover(&intent) {
-                            xscope_telemetry::background_event("billing_recover", "retry");
-                            tracing::warn!(status, reservation_id = %intent.request.id,
-                                "financial admission recovery pending; inference blocked");
-                            thread::sleep(Duration::from_secs(2));
-                            continue;
-                        }
-                        journal.acknowledge(&record)?;
-                        xscope_telemetry::background_event("billing_recover", "success");
-                    }
-                    health.store(true, Ordering::Release);
-                    let Ok(command) = receiver.recv() else {
-                        return Ok(());
-                    };
-                    if command.reply.is_closed() {
-                        continue;
-                    }
-                    // Must be durable before the first reserve HTTP call.
-                    journal.append(&serde_json::to_vec(&command.intent)?)?;
-                    let decision = protocol.admit(&command);
-                    if !matches!(decision, Decision::Uncertain(_)) {
-                        let record = journal.next()?.ok_or_else(|| {
-                            io::Error::other("admission intent disappeared after durable append")
-                        })?;
-                        journal.acknowledge(&record)?;
-                    } else {
-                        health.store(false, Ordering::Release);
-                    }
-                    let result = match decision {
-                        Decision::Dispatched => Ok(()),
-                        Decision::Rejected(status) | Decision::Uncertain(status) => Err(status),
-                    };
-                    let _ = command.reply.send(result);
+            while let Ok(command) = receiver.recv() {
+                if command.reply.is_closed() {
+                    continue;
                 }
-            })();
-            health.store(false, Ordering::Release);
-            if let Err(error) = result {
-                tracing::error!(%error, "financial admission WAL failed; preserving evidence and stopping admission");
+                let decision = protocol.admit(&command);
+                let ambiguous = matches!(decision, Decision::Uncertain(_));
+                let result = match decision {
+                    Decision::Dispatched => Ok(()),
+                    Decision::Rejected(status) | Decision::Uncertain(status) => Err(status),
+                };
+                // A cancelled caller cannot forward. Never dispatch from recovery.
+                let abandoned = command.reply.send(result).is_err();
+                if (ambiguous || abandoned) && protocol.recover(&command.intent).is_err() {
+                    tracing::warn!(reservation_id = %command.intent.request.id,
+                        "admission outcome unknown; inspect central pending reservations");
+                    xscope_telemetry::background_event("billing_recover", "central_pending");
+                }
             }
+            health.store(false, Ordering::Release);
         });
         Ok(Self {
             sender,
@@ -160,7 +118,7 @@ impl BillingAdmission {
         &self,
         request: ReserveRequest,
         trace_headers: http::HeaderMap,
-        space: Arc<StoragePermit>,
+        permit: Arc<Permit>,
     ) -> Result<Ticket, u16> {
         if !self.is_healthy() {
             return Err(503);
@@ -174,9 +132,8 @@ impl BillingAdmission {
         let (reply, receive) = oneshot::channel();
         self.sender
             .try_send(Command {
-                _space: space,
+                _permit: permit,
                 intent: Intent {
-                    version: 1,
                     request,
                     trace_headers,
                 },
@@ -251,7 +208,7 @@ impl Protocol {
                 }
                 // Dispatch is an irreversible ambiguity boundary. Even a lost
                 // dispatch ACK must keep its hold, never auto-refund or resend.
-                "dispatched" | "settled" | "released" => Ok(()),
+                "dispatched" | "settled" | "released" | "waived" => Ok(()),
                 _ => Err(503),
             },
             // Reserve is transactional and replays existing identities BEFORE

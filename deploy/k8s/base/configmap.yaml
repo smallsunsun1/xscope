@@ -29,11 +29,11 @@ data:
   OTEL_RESOURCE_ATTRIBUTES: "deployment.environment.name=local,k8s.cluster.name=docker-desktop"
   XSCOPE_LOG_FORMAT: "json"
   XSCOPE_SERVING_ENTRY_JSON: '{"id":"demo-pool","model":"xscope-demo","address":"inference-serving:8085"}'
-  XSCOPE_USAGE_WAL: "/var/lib/xscope/usage-wal/events.jsonl"
-  # Combined intent + usage data, including retained sealed segments (256 MiB PVC).
-  XSCOPE_WAL_SEGMENT_BYTES: "16777216"
-  XSCOPE_WAL_MAX_BYTES: "201326592"
-  XSCOPE_WAL_MIN_FREE_BYTES: "33554432"
+  XSCOPE_USAGE_QUEUE_CAPACITY: "1024"
+  XSCOPE_USAGE_REPORT_WORKERS: "4"
+  XSCOPE_USAGE_MAX_PENDING_SECONDS: "30"
+  XSCOPE_USAGE_DRAIN_SECONDS: "10"
+  XSCOPE_GATEWAY_GRACE_SECONDS: "20"
   XSCOPE_REGION: "local"
   XSCOPE_MODEL_REVISION: "development"
   XSCOPE_PRICE_VERSION: "2026-09-01"

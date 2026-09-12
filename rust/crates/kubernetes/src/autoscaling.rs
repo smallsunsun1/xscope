@@ -72,14 +72,14 @@ pub struct KedaCondition {
 
 pub fn targets_model(target: &ScaleTargetRef, model: &ModelDeployment) -> bool {
     target.api_version == "platform.xscope.io/v1alpha1"
-        && target.kind == "ModelDeployment"
+        && target.kind == crate::recommendation::target_kind(model)
         && target.name == model.name_any()
 }
 
 pub fn hpa_targets_model(hpa: &Hpa, model: &ModelDeployment) -> bool {
     hpa.spec.as_ref().is_some_and(|spec| {
         spec.scale_target_ref.api_version.as_deref() == Some("platform.xscope.io/v1alpha1")
-            && spec.scale_target_ref.kind == "ModelDeployment"
+            && spec.scale_target_ref.kind == crate::recommendation::target_kind(model)
             && spec.scale_target_ref.name == model.name_any()
     })
 }
@@ -238,12 +238,12 @@ pub fn desired(
     Ok(Some(serde_json::from_value(json!({
         "apiVersion":"keda.sh/v1alpha1", "kind":"ScaledObject", "metadata":metadata,
         "spec":{
-            "scaleTargetRef":{"apiVersion":"platform.xscope.io/v1alpha1","kind":"ModelDeployment","name":model.name_any()},
+            "scaleTargetRef":{"apiVersion":"platform.xscope.io/v1alpha1","kind":crate::recommendation::target_kind(model),"name":model.name_any()},
             "minReplicaCount":scaling.min_replicas,"maxReplicaCount":scaling.max_replicas,"pollingInterval":30,
             "advanced":{"restoreToOriginalReplicaCount":false,"horizontalPodAutoscalerConfig":{
                 "name":format!("keda-hpa-{}",model.name_any()),
                 "behavior":{"scaleUp":{"stabilizationWindowSeconds":30,"policies":[{"type":"Pods","value":1,"periodSeconds":60}]},
-                    "scaleDown":{"selectPolicy":"Disabled"}}
+                    "scaleDown": if scaling.managed { json!({"stabilizationWindowSeconds":60,"policies":[{"type":"Pods","value":1,"periodSeconds":60}]}) } else { json!({"selectPolicy":"Disabled"}) }}
             }},"triggers":triggers
         }
     }))?))
@@ -276,6 +276,7 @@ mod tests {
     fn fixture() -> (ModelDeployment, ScaledObject, Hpa) {
         let mut model = crate::api::example();
         model.spec.autoscaling = Some(AutoscalingSpec {
+            managed: false,
             min_replicas: 1,
             max_replicas: 8,
             target_pending_requests: 4,

@@ -1,30 +1,22 @@
 use std::io;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TryRecvError};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::Principal;
 use crate::billing::Ticket;
-use crate::segments::Journal;
-use crate::storage::{StorageBudget, StoragePermit};
+use crate::delivery::{Permit, Queue};
 
 pub struct UsageSink {
-    storage: Arc<StorageBudget>,
-    writer: Arc<Mutex<Journal>>,
-    reporter: Option<SyncSender<()>>,
-    healthy: Arc<AtomicBool>,
+    queue: Arc<Queue>,
     region: String,
     model_revision: String,
     price_version: String,
 }
 
 pub(crate) struct UsageRecord<'a> {
+    pub price_version: Option<&'a str>,
     pub trace: Option<&'a tracing::Span>,
     pub request_id: &'a str,
     pub principal: &'a Principal,
@@ -39,14 +31,13 @@ pub(crate) struct UsageRecord<'a> {
     pub usage_known: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct UsageEvent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) billing: Option<Ticket>,
-    #[serde(default)]
     pub usage_known: bool,
-    // Only W3C context is persisted, never credentials or client headers.
-    #[serde(default, with = "trace_context")]
+    // Injected into the HTTP request, never persisted in a local journal/body.
+    #[serde(skip)]
     pub trace_headers: http::HeaderMap,
     pub schema_version: String,
     pub event_id: String,
@@ -79,58 +70,35 @@ pub struct CompletionResponse {
 }
 
 impl UsageSink {
-    /// Opens an append-only usage-event write-ahead log and starts its reporter.
-    ///
-    /// # Errors
-    ///
-    /// Returns an I/O error when the WAL cannot be created, opened, or replayed.
-    pub fn open(
-        path: impl AsRef<Path>,
+    pub fn new(
+        queue: Arc<Queue>,
         region: String,
         model_revision: String,
         price_version: String,
-        report_url: String,
-        internal_token: String,
-        storage: Arc<StorageBudget>,
-    ) -> io::Result<Self> {
-        let writer = Arc::new(Mutex::new(Journal::open(path.as_ref(), storage.clone())?));
-        let healthy = Arc::new(AtomicBool::new(true));
-        let reporter = if report_url.is_empty() || internal_token.is_empty() {
-            None
-        } else {
-            Some(spawn_reporter(
-                report_url,
-                internal_token,
-                writer.clone(),
-                healthy.clone(),
-            ))
-        };
-        Ok(Self {
-            storage,
-            writer,
-            reporter,
-            healthy,
+    ) -> Self {
+        Self {
+            queue,
             region,
             model_revision,
             price_version,
-        })
+        }
     }
 
     #[must_use]
     pub fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire) && self.storage.is_ready()
+        self.queue.is_ready()
     }
 
-    pub(crate) fn reserve_space(&self) -> io::Result<Arc<StoragePermit>> {
-        self.storage.reserve()
+    pub(crate) fn reserve(&self) -> io::Result<Arc<Permit>> {
+        self.queue.reserve().map(Arc::new)
     }
 
-    /// Durably appends one immutable usage event before asynchronously reporting it.
+    /// Enqueues one immutable usage event using the admitted request's capacity.
     ///
     /// # Errors
     ///
-    /// Returns an I/O or serialization error when the event cannot be made durable in the WAL.
-    pub(crate) fn record(&self, record: &UsageRecord<'_>) -> io::Result<()> {
+    /// Returns an error when the bounded HTTP queue cannot accept the event.
+    pub(crate) fn record(&self, record: &UsageRecord<'_>, permit: &Permit) -> io::Result<()> {
         let mut trace_headers = http::HeaderMap::new();
         if let Some(span) = record.trace {
             xscope_telemetry::inject(span, &mut trace_headers);
@@ -154,126 +122,48 @@ impl UsageSink {
             },
             endpoint_id: record.endpoint_id.to_owned(),
             region: self.region.clone(),
-            price_version: self.price_version.clone(),
+            price_version: record
+                .price_version
+                .unwrap_or(&self.price_version)
+                .to_owned(),
             input_tokens: record.input_tokens,
             output_tokens: record.output_tokens,
             cached_input_tokens: 0,
             latency_ms: record.latency_ms,
             status: record.status.to_owned(),
         };
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| io::Error::other("usage WAL lock poisoned"))?;
-        if let Err(error) = writer.append(&serde_json::to_vec(&event)?) {
-            self.healthy.store(false, Ordering::Release);
-            return Err(error);
-        }
-        drop(writer);
-        xscope_telemetry::background_event("wal_append", "success");
-
-        if let Some(reporter) = &self.reporter {
-            // Notification only. The journal is the queue, so coalesced wakeups
-            // cannot lose records, even while delivery is blocked for hours.
-            let _ = reporter.try_send(());
-        }
-        Ok(())
+        self.queue.submit(permit, event)
     }
 }
 
-fn spawn_reporter(
-    report_url: String,
-    internal_token: String,
-    journal: Arc<Mutex<Journal>>,
-    healthy: Arc<AtomicBool>,
-) -> SyncSender<()> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let client = match reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(5))
-            .build()
-        {
-            Ok(client) => client,
-            Err(error) => {
-                tracing::error!(%error, "could not create usage reporter client");
-                healthy.store(false, Ordering::Release);
-                return;
-            }
-        };
-        loop {
-            if matches!(receiver.try_recv(), Err(TryRecvError::Disconnected)) {
-                return;
-            }
-            let record = match journal
-                .lock()
-                .map_err(|_| io::Error::other("WAL lock poisoned"))
-                .and_then(|mut wal| wal.next())
-            {
-                Ok(Some(record)) => record,
-                Ok(None) => {
-                    if matches!(
-                        receiver.recv_timeout(Duration::from_secs(1)),
-                        Err(RecvTimeoutError::Disconnected)
-                    ) {
-                        return;
-                    }
-                    continue;
-                }
-                Err(error) => {
-                    healthy.store(false, Ordering::Release);
-                    tracing::error!(%error, "usage WAL read failed; preserving cursor and stopping reporter");
-                    return;
-                }
-            };
-            let event: UsageEvent = match serde_json::from_slice(&record.bytes) {
-                Ok(event) => event,
-                Err(error) => {
-                    healthy.store(false, Ordering::Release);
-                    tracing::error!(%error, "malformed WAL event; preserving evidence and stopping reporter");
-                    return;
-                }
-            };
-            match deliver(&client, &report_url, &internal_token, &event) {
-                Ok(()) => {
-                    if let Err(error) = journal
-                        .lock()
-                        .map_err(|_| io::Error::other("WAL lock poisoned"))
-                        .and_then(|mut wal| wal.acknowledge(&record))
-                    {
-                        healthy.store(false, Ordering::Release);
-                        tracing::error!(%error, "usage checkpoint failed; restart replays the unacknowledged event");
-                        return;
-                    }
-                    xscope_telemetry::background_event("usage_export", "success");
-                }
-                Err(error) => {
-                    xscope_telemetry::background_event("usage_export", "retry");
-                    tracing::warn!(
-                        %error,
-                        event_id = %event.event_id,
-                        "usage report failed; cursor retained, retrying (4xx requires operator attention)"
-                    );
-                    thread::sleep(Duration::from_secs(2));
-                }
-            }
-        }
-    });
-    sender
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DeliveryError {
+    #[error("retryable usage HTTP status {0}")]
+    Retry(u16),
+    #[error("permanent usage HTTP status {0}")]
+    Permanent(u16),
 }
 
-fn deliver(
+fn http_failure(error: reqwest::Error) -> DeliveryError {
+    match error.status().map(|s| s.as_u16()) {
+        None => DeliveryError::Retry(0),
+        Some(status @ (408 | 425 | 429 | 500..=599)) => DeliveryError::Retry(status),
+        Some(status) => DeliveryError::Permanent(status),
+    }
+}
+
+pub(crate) fn deliver(
     client: &reqwest::blocking::Client,
     report_url: &str,
     token: &str,
     event: &UsageEvent,
-) -> Result<(), String> {
+) -> Result<(), DeliveryError> {
     let request = match (event.schema_version.as_str(), &event.billing) {
         ("v1", None) => client.post(report_url).json(event),
         ("v2", Some(ticket)) => {
             let base = report_url
                 .strip_suffix("/usage-events")
-                .ok_or("invalid financial reporter URL")?;
+                .ok_or(DeliveryError::Permanent(0))?;
             let url = format!(
                 "{base}/billing/projects/{}/reservations/{}",
                 ticket.project_id, ticket.id
@@ -283,9 +173,12 @@ fn deliver(
                 && event.output_tokens <= ticket.output_token_limit as u64
             {
                 let settlement = xscope_domain::billing::SettleRequest {
-                    input_tokens: i64::try_from(event.input_tokens).map_err(|e| e.to_string())?,
-                    output_tokens: i64::try_from(event.output_tokens).map_err(|e| e.to_string())?,
-                    latency_ms: i64::try_from(event.latency_ms).map_err(|e| e.to_string())?,
+                    input_tokens: i64::try_from(event.input_tokens)
+                        .map_err(|_| DeliveryError::Permanent(400))?,
+                    output_tokens: i64::try_from(event.output_tokens)
+                        .map_err(|_| DeliveryError::Permanent(400))?,
+                    latency_ms: i64::try_from(event.latency_ms)
+                        .map_err(|_| DeliveryError::Permanent(400))?,
                     endpoint_id: event.endpoint_id.clone(),
                     region: event.region.clone(),
                     status: match event.status.as_str() {
@@ -297,67 +190,33 @@ fn deliver(
                 };
                 client.post(format!("{url}/settle")).json(&settlement)
             } else {
-                // Unknown/over-limit usage is evidence, NOT a zero settlement.
-                // Its hold already lives durably in PostgreSQL. Confirm that
-                // state before advancing this delivery cursor; retain the WAL
-                // record for reconciliation without blocking unrelated usage.
-                let row: serde_json::Value = client
-                    .get(url)
-                    .bearer_auth(token)
-                    .headers(event.trace_headers.clone())
-                    .send()
-                    .and_then(reqwest::blocking::Response::error_for_status)
-                    .and_then(reqwest::blocking::Response::json)
-                    .map_err(|e| e.to_string())?;
-                if !matches!(row["state"].as_str(), Some("dispatched" | "settled")) {
-                    return Err("unresolved usage has no dispatched hold".into());
-                }
-                tracing::warn!(reservation_id = %ticket.id, usage_known = event.usage_known,
-                    "usage requires reconciliation; hold retained, evidence kept in WAL");
-                xscope_telemetry::background_event("billing_pending", "retained");
-                return Ok(());
+                // Store the unresolved outcome centrally, never fabricate zero usage.
+                client.post(format!("{url}/unresolved")).json(
+                    &xscope_domain::billing::UnresolvedRequest {
+                        event_id: event.event_id.clone(),
+                        reason: if event.usage_known {
+                            "usage_over_limit"
+                        } else {
+                            "usage_missing"
+                        }
+                        .into(),
+                        input_tokens: event.usage_known.then_some(event.input_tokens),
+                        output_tokens: event.usage_known.then_some(event.output_tokens),
+                    },
+                )
             }
         }
-        _ => return Err("unsupported or inconsistent usage WAL schema".into()),
+        _ => return Err(DeliveryError::Permanent(400)),
     };
-    request
+    let response = request
         .bearer_auth(token)
         .headers(event.trace_headers.clone())
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
-pub(crate) mod trace_context {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::BTreeMap;
-
-    pub fn serialize<S: Serializer>(
-        headers: &http::HeaderMap,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        let values: BTreeMap<_, _> = ["traceparent", "tracestate"]
-            .into_iter()
-            .filter_map(|name| {
-                headers
-                    .get(name)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|value| (name, value))
-            })
-            .collect();
-        values.serialize(serializer)
+        .map_err(http_failure)?;
+    // error_for_status deliberately excludes 3xx. A redirect is not a commit ACK.
+    if !response.status().is_success() {
+        return Err(DeliveryError::Permanent(response.status().as_u16()));
     }
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<http::HeaderMap, D::Error> {
-        let values = BTreeMap::<String, String>::deserialize(deserializer)?;
-        let mut headers = http::HeaderMap::new();
-        for name in ["traceparent", "tracestate"] {
-            if let Some(value) = values.get(name) {
-                headers.insert(name, value.parse().map_err(serde::de::Error::custom)?);
-            }
-        }
-        Ok(headers)
-    }
+    Ok(())
 }

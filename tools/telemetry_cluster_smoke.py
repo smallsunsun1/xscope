@@ -45,7 +45,8 @@ def main():
         prometheus = f"http://127.0.0.1:{ports[1]}"
         wait(lambda: get(jaeger + "/api/services"))
         trace_id = uuid.uuid4().hex
-        key = os.environ.get("XSCOPE_TEST_API_KEY", "xscope-local-secret")
+        from observability_cluster import inference_api_key
+        key = inference_api_key()
         prompt = "telemetry-sensitive-marker " + "test " * 20
         connection = http.client.HTTPConnection("127.0.0.1", 30082, timeout=10)
         try:
@@ -81,16 +82,16 @@ def main():
             return selected if {"gateway", "control-plane", "operator", "cluster-agent", "runtime"} <= components and {"envoy", "epp"} <= jobs and all(t["health"] == "up" for t in selected) else None
         targets = wait(targets_up)
         print("PASS: all", len(targets), "per-pod Prometheus targets are UP")
-        def wal_capacity_visible():
-            query = urllib.parse.urlencode({"query": 'xscope_wal_storage_bytes{component="gateway"}'})
+        def usage_queue_visible():
+            query = urllib.parse.urlencode({"query": 'xscope_usage_queue{component="gateway"}'})
             result = get(prometheus + "/api/v1/query?" + query)["data"]["result"]
             values = {row["metric"]["kind"]: float(row["value"][1]) for row in result}
-            required = {"retained", "reserved", "free", "limit", "free_floor"}
+            required = {"occupied", "pending", "oldest_seconds", "capacity", "ready"}
             if not required <= values.keys():
                 return None
-            return values if values["retained"] > 0 and values["limit"] > values["retained"] and values["free"] > values["free_floor"] else None
-        storage = wait(wal_capacity_visible)
-        print("PASS: Gateway WAL storage metrics", json.dumps(storage, sort_keys=True))
+            return values if values["capacity"] > 0 and values["occupied"] <= values["capacity"] and values["ready"] == 1 else None
+        queue = wait(usage_queue_visible)
+        print("PASS: Gateway HTTP usage queue metrics", json.dumps(queue, sort_keys=True))
     finally:
         for forward in forwards:
             forward.terminate()

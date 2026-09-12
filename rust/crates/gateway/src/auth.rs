@@ -1,6 +1,9 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use base64::Engine;
@@ -15,6 +18,8 @@ use crate::config::ApiKeyConfig;
 
 #[derive(Clone, Debug)]
 pub struct Principal {
+    pub traffic: Option<Arc<xscope_domain::traffic::TrafficSnapshot>>,
+    pub catalog: Option<Arc<xscope_domain::catalog::CatalogSnapshot>>,
     route_policies: Vec<xscope_domain::RoutePolicy>,
     pub api_key_id: String,
     pub tenant_id: String,
@@ -86,15 +91,22 @@ struct RateWindow {
 }
 
 pub struct DynamicKeySet {
+    pub traffic: Arc<crate::traffic::Traffic>,
+    stopping: AtomicBool,
+    refresh: Mutex<Option<thread::JoinHandle<()>>>,
     current: ArcSwap<KeySet>,
     rate_windows: DashMap<String, RateWindow>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GatewaySnapshot {
+    #[serde(default)]
+    traffic: Option<xscope_domain::traffic::TrafficSnapshot>,
     keys: Vec<GatewayKey>,
     #[serde(default)]
     route_policies: Vec<xscope_domain::RoutePolicy>,
+    #[serde(default)]
+    catalog: Option<xscope_domain::catalog::CatalogSnapshot>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,7 +142,11 @@ const fn default_rate_limit_tpm() -> u64 {
 enum SnapshotError {
     #[error("invalid or duplicate route policy in snapshot")]
     InvalidRoutePolicy,
-    #[error("snapshot request failed: {0}")]
+    #[error("invalid model catalog in snapshot")]
+    InvalidCatalog,
+    #[error("invalid traffic grant")]
+    InvalidTraffic,
+    #[error("snapshot request failed; connection details suppressed")]
     Request(#[from] reqwest::Error),
     #[error("API key {0} has an invalid SHA-256 digest")]
     InvalidDigest(String),
@@ -140,6 +156,9 @@ impl DynamicKeySet {
     #[must_use]
     pub fn new(configs: &[ApiKeyConfig]) -> Arc<Self> {
         Arc::new(Self {
+            traffic: crate::traffic::Traffic::new(),
+            stopping: AtomicBool::new(false),
+            refresh: Mutex::new(None),
             current: ArcSwap::from_pointee(KeySet::from_static(configs)),
             rate_windows: DashMap::new(),
         })
@@ -148,6 +167,15 @@ impl DynamicKeySet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.current.load().0.is_empty()
+    }
+
+    #[must_use]
+    pub fn has_catalog(&self) -> bool {
+        self.current
+            .load()
+            .0
+            .first()
+            .is_some_and(|key| key.principal.catalog.is_some())
     }
 
     #[must_use]
@@ -196,10 +224,11 @@ impl DynamicKeySet {
             return;
         }
         let keys = Arc::clone(self);
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let client = match reqwest::blocking::Client::builder()
                 .connect_timeout(Duration::from_secs(3))
                 .timeout(Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
             {
                 Ok(client) => client,
@@ -208,20 +237,74 @@ impl DynamicKeySet {
                     return;
                 }
             };
-            let url = format!("{}/gateway/snapshot", internal_url.trim_end_matches('/'));
+            let url = format!(
+                "{}/gateway/snapshot?session={}",
+                internal_url.trim_end_matches('/'),
+                keys.traffic.session_id
+            );
+            let report_url = format!(
+                "{}/gateway/traffic-report",
+                internal_url.trim_end_matches('/')
+            );
             loop {
-                match fetch_snapshot(&client, &url, &internal_token).and_then(KeySet::from_snapshot)
-                {
+                let final_report = keys.stopping.load(Ordering::Acquire);
+                let fetched_at = Instant::now();
+                let refresh = fetch_snapshot(&client, &url, &internal_token).and_then(|snapshot| {
+                    let traffic = snapshot.traffic.clone();
+                    let validated = KeySet::from_snapshot(snapshot)?;
+                    if let Some(grant) = traffic {
+                        keys.traffic
+                            .install(grant, fetched_at)
+                            .map_err(|_| SnapshotError::InvalidTraffic)?;
+                    }
+                    Ok(validated)
+                });
+                match refresh {
                     Ok(snapshot) => {
                         let count = snapshot.0.len();
                         keys.current.store(Arc::new(snapshot));
+                        if let Some(report) = keys.traffic.report() {
+                            // ACK follows local gate installation and key/catalog replacement.
+                            if client
+                                .post(&report_url)
+                                .bearer_auth(&internal_token)
+                                .json(&report)
+                                .send()
+                                .and_then(reqwest::blocking::Response::error_for_status)
+                                .is_err()
+                            {
+                                xscope_telemetry::background_event("traffic_ack", "retry");
+                            }
+                        }
                         tracing::info!(count, "API key policy snapshot refreshed");
                     }
                     Err(error) => tracing::warn!(%error, "API key policy snapshot refresh failed"),
                 }
-                thread::sleep(interval);
+                if final_report {
+                    break;
+                }
+                // Short lease refresh even if the legacy key refresh was configured longer.
+                thread::park_timeout(interval.min(Duration::from_secs(5)));
             }
         });
+        if let Ok(mut refresh) = self.refresh.lock() {
+            *refresh = Some(handle);
+        }
+    }
+
+    /// Call after Pingora has closed its request runtimes. Missing final ACK
+    /// remains a visible blocker; never forge a zero count for a crashed process.
+    pub fn finish(&self) {
+        self.traffic.close();
+        self.stopping.store(true, Ordering::Release);
+        if let Ok(mut handle) = self.refresh.lock()
+            && let Some(handle) = handle.take()
+        {
+            handle.thread().unpark();
+            if handle.join().is_err() {
+                tracing::warn!("gateway final traffic ACK unavailable");
+            }
+        }
     }
 }
 
@@ -245,6 +328,8 @@ impl KeySet {
                 .iter()
                 .map(|config| Credential {
                     principal: Principal {
+                        catalog: None,
+                        traffic: None,
                         route_policies: Vec::new(),
                         api_key_id: config.id.clone(),
                         tenant_id: config.tenant_id.clone(),
@@ -266,6 +351,13 @@ impl KeySet {
     }
 
     fn from_snapshot(snapshot: GatewaySnapshot) -> Result<Self, SnapshotError> {
+        if let Some(catalog) = &snapshot.catalog {
+            catalog
+                .validate()
+                .map_err(|_| SnapshotError::InvalidCatalog)?;
+        }
+        let traffic = snapshot.traffic.map(Arc::new);
+        let catalog = snapshot.catalog.map(Arc::new);
         let mut identities = std::collections::HashSet::new();
         for policy in &snapshot.route_policies {
             if policy.revision <= 0
@@ -285,6 +377,8 @@ impl KeySet {
                 .map_err(|_| SnapshotError::InvalidDigest(key.id.clone()))?;
             credentials.push(Credential {
                 principal: Principal {
+                    catalog: catalog.clone(),
+                    traffic: traffic.clone(),
                     route_policies: snapshot
                         .route_policies
                         .iter()

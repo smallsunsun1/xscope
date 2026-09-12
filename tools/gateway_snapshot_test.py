@@ -6,7 +6,7 @@ import tarfile
 import tempfile
 import unittest
 
-from deploy_gateway_billing import inspect_snapshot
+from prepare_usage_cutover import inspect_snapshot
 
 
 class SnapshotTest(unittest.TestCase):
@@ -40,6 +40,16 @@ class SnapshotTest(unittest.TestCase):
                 self.inspect([(name, data)])
         with self.assertRaises(ValueError):
             self.inspect([])
+
+    def test_immutable_reclamation_metadata_is_not_skipped(self):
+        entries = [("events.jsonl", b"{}\n"), ("events.jsonl.seal", b'{"version":1}'),
+                   ("events.jsonl.segments/00000000000000000001.jsonl.reclaimed", b'{"version":1}')]
+        result = self.inspect(entries)
+        self.assertEqual(len(result), 3)
+        for name, data in entries:
+            self.assertEqual(result[name], (len(data), hashlib.sha256(data).hexdigest()))
+        with self.assertRaises(ValueError):
+            self.inspect([("events.jsonl.reclaimed", b"invalid")])
 
 
 if __name__ == "__main__":

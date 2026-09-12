@@ -78,7 +78,7 @@ bazel run //tools:trace_dashboard_smoke
 - Prometheus 按 Pod 采集 Gateway、Control Plane、cluster-agent、Operator、
   Runtime、Envoy 和 EPP。多副本不通过 Service 负载均衡采集。
 - Rust HTTP 指标包含请求数、耗时、in-flight 和首字节延迟；另有 token、
-  reconcile、WAL 写入和 usage 投递结果指标。路由使用模板名，避免将对象名、
+  reconcile、HTTP 队列和 usage 投递结果指标。路由使用模板名，避免将对象名、
   用户、Key 或 request ID 放入指标标签。
 
 示例 PromQL：
@@ -151,9 +151,7 @@ bazel run //tools:observability_persistence_smoke -- --restart
 
 ## 尚未完成的部分
 
-本地 smoke 已验证 EPP span 与上游关联。数据库查询 span、WAL 重放后的跨进程
-trace 连续性尚未实现；开发 echo 链路的验证不能代替 GPU/vLLM 的生产验证。
+本地 smoke 已验证 EPP span 与上游关联。数据库查询细粒度 span 尚未实现；Gateway HTTP 上报传递 W3C trace context，已无本地日志重放模式；开发 echo 链路的验证不能代替 GPU/vLLM 的生产验证。
 
-已有 target down、推理错误率和 usage 持久化/投递失败的 Prometheus 告警规则，
-尚未配置 Alertmanager 通知接收方。正式 SLO、不可变审计、告警闭环仍属于
-后续阶段，不因接入 tracing/metrics 而视为完成。
+已有 target down、推理错误率和 usage 投递失败的 Prometheus 告警规则，
+尚未配置 Alertmanager 通知接收方。SLO 和只追加审计见 [后台工作流](backend-workflows.md)，通知接收方和告警闭环仍需单独联调。

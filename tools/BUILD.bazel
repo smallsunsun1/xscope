@@ -2,6 +2,36 @@ load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@xscope_pypi//:requirements.bzl", "requirement")
 
 py_binary(
+    name = "deploy_observability_alerts",
+    srcs = ["deploy_observability_alerts.py"],
+    deps = [":observability_cluster", requirement("pyyaml")],
+)
+
+py_binary(
+    name = "slo_rules_check",
+    srcs = ["slo_rules_check.py"],
+    deps = [":observability_cluster", requirement("pyyaml")],
+)
+
+py_test(
+    name = "observability_alerts_test",
+    srcs = ["observability_alerts_test.py", "deploy_observability_alerts.py"],
+    deps = [":observability_cluster", requirement("pyyaml")],
+)
+
+py_test(
+    name = "local_secrets_test",
+    srcs = ["local_secrets_test.py", "local_secrets.py"],
+    deps = [":observability_cluster"],
+)
+
+py_binary(
+    name = "local_secrets",
+    srcs = ["local_secrets.py"],
+    deps = [":observability_cluster"],
+)
+
+py_binary(
     name = "console_preview",
     srcs = ["console_preview.py"],
     args = ["$(rlocationpath //web/console:console)"],
@@ -10,8 +40,8 @@ py_binary(
 )
 
 py_test(
-    name = "gateway_billing_test",
-    srcs = ["gateway_billing_test.py"],
+    name = "usage_memory_test",
+    srcs = ["usage_memory_test.py"],
     args = ["$(rlocationpath //rust/crates/gateway)"],
     data = ["//rust/crates/gateway"],
     deps = ["@rules_python//python/runfiles"],
@@ -19,11 +49,56 @@ py_test(
 )
 
 py_binary(
+    name = "prepare_usage_cutover",
+    srcs = ["prepare_usage_cutover.py"],
+    deps = [":observability_cluster"],
+)
+
+py_test(
+    name = "usage_cutover_test",
+    srcs = ["usage_cutover_test.py", "prepare_usage_cutover.py"],
+    args = ["$(rlocationpath :deploy-local.sh)", "$(rlocationpath //:deploy/k8s/base/configmap.yaml)", "$(rlocationpath //:deploy/k8s/base/database.yaml)", "$(rlocationpath //:deploy/k8s/base/workloads.yaml)", "$(rlocationpath :reset-local-data.sh)"],
+    data = [":deploy-local.sh", "//:deploy/k8s/base/configmap.yaml", "//:deploy/k8s/base/database.yaml", "//:deploy/k8s/base/workloads.yaml", ":reset-local-data.sh"],
+    deps = [":observability_cluster", "@rules_python//python/runfiles", requirement("pyyaml")],
+)
+
+py_binary(
     name = "billing_protocol_smoke",
+    testonly = True,
     srcs = ["billing_protocol_smoke.py"],
-    args = ["$(rlocationpath //rust/crates/control-plane)", "$(rlocationpath //rust/crates/gateway)"],
-    data = ["//rust/crates/control-plane", "//rust/crates/gateway"],
-    deps = [":billing_cursor_checks", ":billing_projection_checks", "@rules_python//python/runfiles"],
+    args = ["$(rlocationpath //rust/crates/control-plane)", "$(rlocationpath //rust/crates/gateway)", "$(rlocationpath //rust/crates/cluster-agent)", "$(rlocationpath //rust/crates/payments:payment_fixture)"],
+    data = ["//rust/crates/control-plane", "//rust/crates/gateway", "//rust/crates/cluster-agent", "//rust/crates/payments:payment_fixture"],
+    deps = [":billing_cursor_checks", ":billing_projection_checks", ":billing_review_checks", ":cluster_protocol_checks", ":cluster_pull_checks", ":event_worker_checks", ":payment_checks", ":model_catalog_checks", ":managed_traffic_checks", "@rules_python//python/runfiles"],
+)
+
+py_library(name = "model_catalog_checks", srcs = ["model_catalog_checks.py"], imports = ["."])
+py_library(name = "managed_traffic_checks", srcs = ["managed_traffic_checks.py"], imports = ["."])
+
+py_library(name = "payment_checks", srcs = ["payment_checks.py"], imports = ["."])
+py_binary(name = "backend_cluster_check", srcs = ["backend_cluster_check.py"], deps = [":observability_cluster"])
+
+py_library(
+    name = "event_worker_checks",
+    srcs = ["event_worker_checks.py"],
+    imports = ["."],
+)
+
+py_library(
+    name = "cluster_protocol_checks",
+    srcs = ["cluster_protocol_checks.py"],
+    imports = ["."],
+)
+
+py_library(
+    name = "cluster_pull_checks",
+    srcs = ["cluster_pull_checks.py"],
+    imports = ["."],
+)
+
+py_library(
+    name = "billing_review_checks",
+    srcs = ["billing_review_checks.py"],
+    imports = ["."],
 )
 
 py_library(
@@ -40,19 +115,13 @@ py_library(
 
 py_binary(
     name = "deploy_billing_protocol",
-    srcs = ["deploy_billing_protocol.py"],
-    deps = [":observability_cluster"],
-)
-
-py_binary(
-    name = "deploy_gateway_billing",
-    srcs = ["deploy_gateway_billing.py"],
+    srcs = ["deploy_billing_protocol.py", "local_secrets.py"],
     deps = [":observability_cluster"],
 )
 
 py_test(
     name = "gateway_snapshot_test",
-    srcs = ["gateway_snapshot_test.py", "deploy_gateway_billing.py"],
+    srcs = ["gateway_snapshot_test.py", "prepare_usage_cutover.py"],
     deps = [":observability_cluster"],
 )
 
@@ -62,27 +131,12 @@ py_binary(
     deps = [":observability_cluster"],
 )
 
-py_test(
-    name = "usage_recovery_test",
-    srcs = ["usage_recovery_test.py"],
-    args = ["$(rlocationpath //rust/crates/gateway)"],
-    data = ["//rust/crates/gateway"],
-    deps = ["@rules_python//python/runfiles"],
-    size = "medium",
-)
-
 py_binary(
     name = "quota_recovery_smoke",
     srcs = ["quota_recovery_smoke.py"],
     args = ["$(rlocationpath //rust/crates/gateway)", "$(rlocationpath //python:runtime)"],
     data = ["//rust/crates/gateway", "//python:runtime"],
     deps = ["@rules_python//python/runfiles"],
-)
-
-py_binary(
-    name = "deploy_usage_recovery",
-    srcs = ["deploy_usage_recovery.py"],
-    deps = [":observability_cluster"],
 )
 
 py_test(
@@ -97,6 +151,7 @@ py_test(
 py_binary(
     name = "inference_cluster_smoke",
     srcs = ["inference_cluster_smoke.py"],
+    deps = [":observability_cluster"],
 )
 
 py_binary(
@@ -155,6 +210,7 @@ py_binary(
 py_binary(
     name = "telemetry_cluster_smoke",
     srcs = ["telemetry_cluster_smoke.py"],
+    deps = [":observability_cluster"],
 )
 
 py_library(

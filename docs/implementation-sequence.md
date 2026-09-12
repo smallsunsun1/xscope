@@ -1,5 +1,21 @@
 # Backend implementation sequence
 
+## Managed traffic increment (2026-09-12, not deployed)
+
+See [managed traffic contracts](managed-traffic.md): member-side observed readiness, dedicated-entry binding and automatic registration, per-incarnation expiring Gateway grants, route version ACK, atomic local drain/admission counters, durable participant tracking, normal incarnation retirement, and UID/RV-bound manual scaling/deletion after drain. Legacy entries and KEDA scale-down remain outside the guarantee; unknown crashed participants block until there is termination evidence. No Gateway WAL/SQLite or live-cluster reset was introduced.
+
+## Model catalog and release operations (2026-09-11, code-only increment)
+
+See [current contracts and remaining work](model-catalog.md): SeaORM model catalog and immutable prices, request-body model routing with atomic Gateway snapshots, per-request frozen model terms, project-owner pause/promote/rollback with transactional append-only route history, and engine-specific startup/readiness probes. No live Kubernetes rollout is implied. Automatic deployment registration, global Gateway ACK/drain and safe scale-down remain open; the six-item production roadmap is not marked complete.
+
+## Volatile usage delivery revision (2026-09-06)
+
+New source/manifests exclusively use HTTP + a bounded in-memory outbox; PostgreSQL money admission/settlement remains authoritative. Includes admission-slot reservation, delayed retries without head-of-line blocking, permanent-error disposition, SIGTERM drain, central unresolved receipts, two-reviewer loss waivers, central orphan-age monitoring and guarded legacy WAL cutover. See [contract and validation commands](usage-delivery.md). Historical rollout notes below do not imply this revision has been deployed; no live financial holds are automatically changed.
+
+The optional Gateway WAL implementation has been removed, including the archive crate, cloud patches/tools, disk metrics, alerts and legacy deployment overlay. Only a read-only one-time migration guard remains; historical PVC/object evidence and central holds are not deleted. Current feature boundaries are in the [completion checklist](completion-checklist.md), [backend workflows](backend-workflows.md) and [payment contract](payment-providers.md). This cleanup has not rolled the live cluster.
+
+## Historical checkpoints (superseded, not current operating instructions)
+
 The Kubernetes integration now uses Rust/kube-rs, following the user's revised architecture. All Rust packages live under rust/crates; the business control plane and Kubernetes adapters retain separate processes and RBAC boundaries. All application builds, tests and image packaging use Bazel.
 
 Each stage includes regression checks and a local Kubernetes verification before the next stage is considered complete.
@@ -9,7 +25,7 @@ Each stage includes regression checks and a local Kubernetes verification before
 - [x] 2. InferencePool and llm-d EPP behind a standalone Envoy serving entry; Pingora addresses that entry, not individual model Pods. Development echo uses in-flight scoring; real GPU cache-aware scoring still requires vLLM metrics.
 - [x] 3. RoutePolicy selecting registered stable/canary pools for the existing public model, with validated header rules and explicit revision identity. Arbitrary multi-model routing remains future work.
 - [x] 4. Operator-owned workloads, PDB and InferencePool; explicit ownership boundaries for llm-d infrastructure and EPP. Subsequent user decision replaces direct HPA generation with KEDA ScaledObject; see [KEDA implementation boundaries](keda-autoscaling.md). Full GPU/SLO autoscaling, resource-pool admission and automatic public serving registration are not included in this checkpoint.
-- [ ] 5. Idempotent billing reserve/settle/release protocol, durable WAL checkpoint and event delivery.
+- [ ] 5. Idempotent billing reserve/settle/release protocol, idempotent HTTP usage delivery and durable central events.
 - [ ] 6. Authenticated multicluster desired state, heartbeat and versioned ACK/NACK.
 - [ ] 7. OpenTelemetry, Prometheus, SLO definitions and append-only audit.
 - [ ] 8. Real payment provider and tax invoice integration, then further inference APIs.
@@ -50,15 +66,7 @@ Subsequent KEDA checkpoint: direct HPA generation is replaced by typed KEDA Scal
 - Live Operator smoke passed twice, including a deliberately foreign PDB, drift repair, real Pingora → Envoy/EPP → managed Pool → Echo Pod SSE, CPU-driven HPA and (second pass) two ready replicas, optional-resource removal, preserved external EPP and owner-reference GC. All temporary fixtures are removed.
 - Original Kubernetes CRUD/scale smoke passed. Inference regression first encountered one fail-closed 503 from a stale Redis connection after an earlier Redis restart; the next run reconnected and passed authentication, SSE/JSON, cancellation, Pod selection, usage persistence and balanced ledger settlement. Idempotent recovery from ambiguous quota operations remains stage 5; this run did not add unsafe automatic POST retries.
 - Telemetry regression passed: one trace includes Gateway, Envoy, EPP, Runtime and Control Plane; all 10 existing per-Pod Prometheus targets are UP. Final cluster check confirmed all 15 platform Pods healthy, the metrics-server Pod ready and no temporary ModelDeployment/HPA/PDB fixtures remaining.
-- New pools still need installation-owned EPP and explicit Gateway serving-catalog registration. This is not automatic customer model onboarding, GPU validation, queue-based scaling or completed multicluster synchronization. Next is stage 5 billing reservations, WAL checkpoints and events. See [Operator guide](operator-lifecycle.md).
-
-## Billing recovery foundation (2026-09-05, stage 5 remains open)
-
-- Added single-writer, bounded-memory WAL replay with durable contiguous checkpoints; 4xx no longer skip usage. Corruption/torn tails preserve evidence and fail closed. Existing JSONL history is retained; no compaction or monetary reservation guarantee is implied.
-- Redis reserve/settle now carry server-generated operation IDs across bounded reconnect retries, reject conflicting settlement payloads and do not recreate expired buckets. Model POST is not retried.
-- All 15 Bazel host test targets passed, including 1,108-record recovery through rejection/lost ACK/process kill. Disposable Redis fault injection passed with two real Gateway processes: reserve/settle replies lost after execution, duplicate/conflicting settlement, shared exact counters and stale-connection first-request recovery.
-- Bazel-built Linux Gateway was rolled out using Recreate against its existing PVC. All 62 prior WAL records were privately backed up and retained; checkpoint caught up. Live inference then passed SSE/JSON, cancellation, usage persistence and balanced ledger; telemetry passed a five-service trace and all 10 Prometheus targets UP. Regression added four development usage events; no database, Redis, identity or PVC reset occurred.
-- Monetary reserve/settle/release, atomic budget enforcement and transaction-linked outbox/event consumers are still pending, as are WAL compaction and per-replica persistent storage. See [billing recovery boundaries and commands](billing-recovery.md).
+- New pools still need installation-owned EPP and explicit Gateway serving-catalog registration. This is not automatic customer model onboarding, GPU validation, queue-based scaling or completed multicluster synchronization. Next is stage 5 billing reservations, HTTP usage delivery and central events. See [Operator guide](operator-lifecycle.md).
 
 ## Money protocol and transactional outbox (2026-09-05, stage 5 remains open)
 
@@ -67,18 +75,18 @@ Subsequent KEDA checkpoint: direct HPA generation is replaced by typed KEDA Scal
 - Account-local event sequences are allocated under the account transaction lock, with bounded polling, redelivery and durable CAS ACK. No global commit-order watermark or external message broker is assumed.
 - All 15 host Bazel test targets pass. Real PostgreSQL/two-control-plane smoke passed concurrent balance and budget admission, idempotent/conflicting settlement, refund protection, partial cancellation charging, deliberately failed outbox rollback, and process restart with retained holds/ACKs. Temporary fixtures removed; no live financial holds were created by that test.
 - Bazel-built Linux control-plane deployed after a private xscope schema backup; additive tables verified and old writers terminated. Live internal-auth checks passed; real inference created matching ledger/outbox evidence. SSE/JSON/cancellation regression and a five-service trace passed; all 10 Prometheus targets UP. Existing identities, Redis, WAL and PVCs were retained.
-- Gateway does not yet call the monetary protocol. The next step is request identity/pre-reserve/dispatch/WAL settlement integration and uncertain-request reconciliation, not UI expansion or a claim of end-to-end monetary admission. See [money protocol](billing-protocol.md).
+- Gateway does not yet call the monetary protocol. The next step is request identity/pre-reserve/dispatch/HTTP settlement integration and uncertain-request reconciliation, not UI expansion or a claim of end-to-end monetary admission. See [money protocol](billing-protocol.md).
 
 ## Gateway monetary admission checkpoint (2026-09-05, stage 5 remains open)
 
 - Gateway now persists reservation intent before financial admission and withholds prompt bytes until PostgreSQL records dispatch. Server-generated financial request IDs are separate from untrusted client correlation IDs. Shared Rust domain DTOs keep Gateway and SeaORM control-plane contracts aligned.
-- Separate single-writer admission WAL and v1/v2 usage WAL avoid completion-behind-intent deadlocks. Recovery releases reserved orphan intents but never dispatches/replays inference. Lost settlement ACKs replay the same immutable completion; unknown or over-limit usage retains its database hold and WAL evidence, without becoming a zero charge.
+- Historical Gateway WAL recovery was replaced by the volatile HTTP delivery contract; old evidence remains outside the running path.
 - Conservative context-sized input bounds plus a normalized provider output limit protect admission; reject ambiguous max fields and multi-result n != 1. This is deliberately more conservative than tokenizer-estimated money admission. No compaction, automatic unknown-usage reconciliation or shared-file multireplica deployment is claimed.
 - All 17 host Bazel test targets passed (including independently added KEDA configuration tests). New fault-peer test covers reserve/dispatch/settle lost replies, process kills after remote commits, duplicate client IDs, unknown/over-limit usage, rejected admission and no provider replay. Real PostgreSQL/two-control-plane/two-Gateway smoke passed: eight concurrent requests yield one Runtime invocation and seven 402 responses; successful repeated client IDs settle separately and balance exactly.
-- Only the Bazel-built Linux Gateway image was loaded and deployed for this change. Existing WAL/checkpoints were privately backed up at `.build/gateway-billing-backup-20260905T131751863042Z`; Recreate rollout retained old history and enabled financial admission. Keycloak, PostgreSQL, Redis and PVCs were not reset.
+- The historical Gateway rollout preserved prior evidence and identities; it does not describe the current deployment strategy.
 - Live checks passed reserve -> dispatch -> settled events with one balanced ledger, SSE/JSON, EPP Pod selection, cancellation propagation and an intentionally retained unknown-usage hold (`req-01a071b8-fe92-74c0-9dcd-d9482c3e7db2`). Trace `bea6f85ef3ba480f9014eae0df417205` spans Gateway/Envoy/EPP/Runtime/control-plane; all 10 Prometheus targets are UP.
 - Scoped image builds now accept `./tools/bazel-linux.sh images gateway`. Copy selected tarballs only after Bazel build success; do not silently continue with stale archives when a separate cquery fails. An isolated Bazel output base was used for operational scripts while an unrelated release build held the default server.
-- Next: evidence-backed reconciliation for ambiguous holds, segmented/archived WAL with disk-watermark admission and per-replica storage, then production event consumers and multicluster contracts. See [money protocol](billing-protocol.md).
+- Next: evidence-backed reconciliation for ambiguous holds, bounded HTTP delivery with explicit loss handling, then production event consumers and multicluster contracts. See [money protocol](billing-protocol.md).
 
 ## Billing consumer contention and pending discovery (2026-09-05, stage 5 remains open)
 
@@ -89,7 +97,7 @@ Subsequent KEDA checkpoint: direct HPA generation is replaced by typed KEDA Scal
 - Only the Bazel Linux ARM64 release control-plane image was updated (`sha256:0c7c97d0dd683450276b7181fe347bbcb9a6154367d525dd5be1a8a6189aa34a`). Private business backup: `.build/billing-backup-20260905T150954301253Z/xscope.sql`. Migration/index verified, old control-plane exited, and Gateway/other workloads were not rolled. Existing unknown-usage hold remains dispatched; no schema reset, consumer ACK manipulation or history deletion occurred.
 - Live internal discovery/auth checks and actual Pingora/EPP inference reserve -> dispatch -> settled passed with a balanced ledger. SSE telemetry trace `a96fbd48f27640c18305d94d433ff08f` includes Gateway/Envoy/EPP/Runtime/control-plane; all 10 Prometheus targets are UP. These are local Echo runtime checks, not GPU throughput tests.
 - Recursive Bazel discovery now explicitly ignores `.build` through `.bazelignore`, avoiding symlink loops from the earlier isolated operational output base. Existing caches/backups are preserved.
-- See [capacity assumptions, measured probes and remaining bottlenecks](billing-capacity.md) and [internal API contract](billing-protocol.md). Next priorities are transactional balance/held/monthly-budget projections, bounded WAL concurrency and archival, evidence-backed reconciliation, and production consumer scheduling before claiming stage 5 or production-scale readiness.
+- See [capacity assumptions, measured probes and remaining bottlenecks](billing-capacity.md) and [internal API contract](billing-protocol.md). Next priorities are transactional balance/held/monthly-budget projections, bounded HTTP delivery, evidence-backed reconciliation, and production consumer scheduling before claiming stage 5 or production-scale readiness.
 
 ## Transactional billing projections (2026-09-05, stage 5 remains open)
 
@@ -100,18 +108,7 @@ Subsequent KEDA checkpoint: direct HPA generation is replaced by typed KEDA Scal
 - Local deployment now excludes old writers, backs up after quiescence, then resumes the new control-plane. `deploy-local.sh` uses the same exclusive cutover without data reset. Do not mix or roll back to old non-projecting writers; this local maintenance workflow is not production zero-downtime fencing. See [projection protocol](billing-projections.md).
 - Bazel-built Linux ARM64 release image `sha256:60c5755947b270ac0340d7348713294e3b64400a61d82632ac3bd14c6b11f2d8` is deployed as `control-plane-5b7cb9f78-kwkqk`. Quiescent backup: `.build/billing-backup-20260905T153555113386Z/xscope.sql`. New inference `req-01a07237-48b5-71b0-a564-06369003adc1` reserved/dispatched/settled with balanced entries; live account/key/month projections match source history without repair. The existing unknown-usage hold remains dispatched, and all 15 platform Pods are ready. Gateway, identities, PostgreSQL, Redis and PVCs were not restarted or reset.
 - SSE telemetry regression passed with trace `029e68f551364092888673e862fe791a` across Gateway/Envoy/EPP/Runtime/control-plane; all 10 Prometheus targets are UP. These remain local Echo runtime checks, not GPU or production throughput certification.
-- Next: bounded Gateway persistence concurrency, WAL segmentation/disk-watermark admission and archive baselines, production consumer scheduling and evidence-backed reconciliation. Large-account cold backfill, account hotspots, full key snapshot size and sustained production capacity remain unverified.
-
-## WAL storage admission and retained segments (2026-09-06, stage 5 remains open)
-
-- Gateway intent/usage journals share conservative in-flight space permits. Admission checks logical retained-data capacity and filesystem free space via nix statvfs; readiness/new inference fail closed below the watermarks without stopping existing completion writes or background settlement retries.
-- Fully ACKed segments seal with SHA-256 before a durable new file and atomic active manifest switch. All old data/checkpoints remain, including unknown-usage evidence. Restart validates archives and detects missing/corrupt manifests; unacknowledged backlog is never rotated away. This is local retention, not remote archival or automatic disk reclamation.
-- Bazel Gateway process fault tests now force tiny segments across reserve/dispatch/settle lost replies and process kills, then prove pending settlement continues while low-space admission is closed and that restoring the watermark does not replay ACKed work. Unit tests cover permit ownership, generation fencing, switch crash windows, corruption and undrained-file behavior. Deployment snapshot tests cover all generations, torn records and unsafe paths without extraction.
-- The rollout helper now copies the complete WAL tree privately and hashes each existing data prefix for post-rollout verification. Live copies are not atomic restore points. Linux image export uses a temporary file and atomic rename to handle read-only previous Bazel tar outputs safely.
-- All 18 host Bazel test targets pass, including strict Clippy/format checks. Disposable PostgreSQL/two-control-plane/two-Gateway regression also passes. Regenerated Bazel rust-analyzer project data after adding nix; no native Cargo builds were used.
-- Linux ARM64 Bazel release image `sha256:3df773d566dc094ec66958687b38003c176497adfd28ce03acf4644d036a1a93` is deployed as `gateway-6d7474894f-rlkd7`; prior data prefixes are unchanged. Private live-copy archive: `.build/gateway-billing-backup-20260905T161604247112Z/wal-live-snapshot.tar`. CPU request stays 20m with the existing PVC. No other platform deployment, database, identity or quota state was reset.
-- Online request `req-01a0725b-e545-7f91-b5c1-0dda9e81138d` reserved/dispatched/settled with balanced ledger and matching projections. SSE trace `3c68102e9f954e24bd64384d0e9d3ad8` spans Gateway/Envoy/EPP/Runtime/control-plane; all 10 Prometheus targets are UP and all five WAL capacity series are visible. At the check, retained data was 48,185 bytes and in-flight reservation was zero; readiness is 200 and all 15 platform Pods are ready. Checks add development inference records; the Runtime remains Echo, not a GPU validation.
-- Next: durable remote archives and safe reclamation, provider-evidence reconciliation, production event consumers and per-replica storage. The 256 MiB local PVC and these functional tests are not production throughput certification. See [WAL storage contract](wal-storage.md).
+- Next: bounded Gateway HTTP concurrency and explicit crash-loss boundaries, production consumer scheduling and evidence-backed reconciliation. Large-account cold backfill, account hotspots, full key snapshot size and sustained production capacity remain unverified.
 
 ## Subsequent Rust-only migration and telemetry verification (2026-09-05)
 

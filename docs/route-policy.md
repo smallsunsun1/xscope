@@ -1,12 +1,12 @@
 # 项目级流量路由（阶段 3）
 
 本地管理入口：<http://localhost:30081/#/routing>。只有对应租户的 owner 可以修改；成员可以查看。
-所有应用构建、测试与镜像打包仍经过 Bazel。业务数据使用 SeaORM 和 PostgreSQL；本次只新增
-`xscope.route_policies` 表，不重置用户、账本、WAL、Redis 或监控存储。
+所有应用构建、测试与镜像打包仍经过 Bazel。业务数据使用 SeaORM 和 PostgreSQL，不重置用户、账本、历史证据、Redis 或监控存储。
+2026-09-11 增量新增模型目录、`route_revisions` 历史和发布动作，详见 [模型与发布契约](model-catalog.md)；代码更新不代表本地服务已经升级。
 
 ## 已实现的边界
 
-- 一个项目、一个公开模型对应一份 RoutePolicy。当前公开模型仍只有 `xscope-demo`，不是任意多模型路由。
+- 一个项目、一个公开模型对应一份 RoutePolicy。默认引导模型为 `xscope-demo`，可以通过数据库目录注册其他模型及各自的服务入口。
 - Stable / Canary 对应预注册模型池，不接受用户提交的地址。网关只选择 serving Service；
   Envoy + llm-d EPP 仍负责 InferencePool 内的 Pod 选择。
 - 请求头规则按列表顺序首次精确匹配；无匹配时使用 0–100% 的 Canary 权重。
@@ -19,8 +19,7 @@
 - 配置了未知池返回 503；选中的 serving 连接失败返回 502/503；EPP 故障返回上游错误。
   不会自动退回 Stable 并重放 POST。正在执行的 SSE 不因策略更新切池，取消仍向下游传播。
 
-Pingora 在请求体过滤之前建立 upstream，因此当前按网关唯一公开模型选池。请求体中的 model
-仍会再次校验，提示词在校验/配额预占之前不会被释放。不能将此实现宣称为多模型请求体路由。
+网关在 Pingora 的 request_filter 中有界读取完整请求，按请求体 model 选择 Pool，并完成权限、配额和资金预占后才连接上游。快照中的模型、价格和目标 revision 在请求内固定，已开始的 SSE 不会随配置变化切换目标。
 
 ## 如何操作
 
@@ -67,7 +66,8 @@ Canary 的请求头规则**。发布是异步快照分发，界面显示的是�
 
 首次创建用 0，更新必须带读取到的 revision。PostgreSQL 条件 UPDATE 原子比较并递增版本，
 并发写只有一个成功，另一个返回 409；网络结果不确定时重新 GET 核对，不盲目覆盖。
-回退也是 PUT，新版本递增，没有删除后重新从 1 计数的 ABA 问题。尚无完整策略历史/审批系统。
+回退可以使用 PUT 或发布动作 API，均生成递增版本，没有删除后重新从 1 计数的 ABA 问题。
+新增 `GET .../route-policy/history` 和 `POST .../route-policy/actions` 支持不可变历史与 pause/promote/rollback；审批、全局 ACK 和自动 SLO 放量门禁仍未实现。
 
 ## 证据和测试
 
@@ -75,7 +75,7 @@ Canary 的请求头规则**。发布是异步快照分发，界面显示的是�
 - 用量记录持久化实际 pool / model_revision；定价版本仍独立于模型版本。
 - Jaeger gateway span 增加 `xscope.route.pool`、`xscope.route.revision`、`xscope.model.revision`。
 - Prometheus `xscope_route_selections_total{pool,reason}` 只使用注册池和固定原因，
-  表示请求体准入前的选池次数，不等同于成功推理/可计费请求数。Canary Pod 也纳入抓取。
+  表示资金/TPM 准入前的选池次数，不等同于成功推理/可计费请求数。Canary Pod 也纳入抓取。
 
 ```bash
 bazel test //... --jobs=3
@@ -91,5 +91,5 @@ SSE 与取消。集群 smoke 使用管理员 kubectl 临时隧道（不是 OIDC 
 验证权限、并发 CAS、真实 EPP 选择的 Pod 和用量版本；最后吊销测试 key，保留项目/账本证据，
 不修改其他项目策略。所有临时隧道自动关闭，用户访问仍走 NodePort。
 
-下一阶段：Operator 为 ModelDeployment 管理动态 InferencePool、HPA、PDB，并明确与 llm-d
-安装资源的所有权。当前池仍由安装清单管理；新建 ModelDeployment 不会自动接入这两个池。
+Operator 已管理 ModelDeployment 对应的 InferencePool、PDB 和 KEDA ScaledObject；llm-d/Envoy 仍由安装层管理。
+后续需要把部署就绪观测与目录自动注册连接起来，并完成全局 ACK、旧 Pool 排空和安全缩容。

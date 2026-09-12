@@ -53,7 +53,55 @@ pub struct PutRoutePolicy {
     pub spec: RoutePolicySpec,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReleaseAction {
+    Pause {
+        expected_revision: i64,
+    },
+    Promote {
+        expected_revision: i64,
+    },
+    Rollback {
+        expected_revision: i64,
+        target_revision: i64,
+    },
+}
+impl ReleaseAction {
+    pub fn expected_revision(&self) -> i64 {
+        match self {
+            Self::Pause { expected_revision }
+            | Self::Promote { expected_revision }
+            | Self::Rollback {
+                expected_revision, ..
+            } => *expected_revision,
+        }
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Pause { .. } => "pause",
+            Self::Promote { .. } => "promote",
+            Self::Rollback { .. } => "rollback",
+        }
+    }
+}
+
 impl RoutePolicySpec {
+    pub fn pause(&self) -> Self {
+        let mut next = self.clone();
+        next.canary_percent = 0;
+        next.headers
+            .retain(|rule| rule.target == RouteTarget::Stable);
+        next
+    }
+    pub fn promote(&self) -> Result<Self, String> {
+        let mut next = self.clone();
+        next.stable_pool = next.canary_pool.take().ok_or("no canary pool to promote")?;
+        next.canary_percent = 0;
+        // Cohorts belonged to the previous release, not to a future canary.
+        next.headers.clear();
+        Ok(next)
+    }
     pub fn validate(&self) -> Result<(), String> {
         if self.stable_pool.trim().is_empty() || self.stable_pool.len() > 128 {
             return Err("stable_pool must be a registered pool ID".into());
@@ -173,6 +221,24 @@ mod tests {
             target: RouteTarget::Stable,
         });
         assert_eq!(policy.select(|_| true, 0), ("stable", "header"));
+    }
+
+    #[test]
+    fn pause_removes_header_bypass_and_promote_is_a_new_stable() {
+        let mut policy = spec();
+        policy.headers.push(HeaderRoute {
+            name: "x-route-cohort".into(),
+            value: "test".into(),
+            target: RouteTarget::Canary,
+        });
+        let paused = policy.pause();
+        assert!(paused.validate().is_ok());
+        assert!((0..100).all(|roll| paused.select(|_| true, roll).0 == "stable"));
+        let promoted = policy.promote().ok();
+        assert!(promoted.as_ref().is_some_and(|p| p.stable_pool == "canary"
+            && p.canary_pool.is_none()
+            && p.headers.is_empty()));
+        assert!(promoted.is_some_and(|p| p.promote().is_err()));
     }
 
     #[test]

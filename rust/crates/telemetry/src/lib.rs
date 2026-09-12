@@ -256,13 +256,24 @@ struct Metrics {
     pub events: IntCounterVec,
     tokens: IntCounterVec,
     routes: IntCounterVec,
-    wal_storage: IntGaugeVec,
+    event_worker_state: IntGaugeVec,
+    usage_queue: IntGaugeVec,
+    pending_hold_age: IntGaugeVec,
 }
 // Metric names, help strings and label sets are compile-time constants; each
 // descriptor is unique in this private registry, so construction/registration cannot fail.
 #[allow(clippy::unwrap_used)]
 static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let registry = Registry::new();
+    let pending_hold_age = IntGaugeVec::new(Opts::new("xscope_billing_pending_oldest_seconds", "Oldest central pending reservation, including orphaned Gateway requests; age alone never authorizes release"), &["state"]).unwrap();
+    let usage_queue = IntGaugeVec::new(
+        Opts::new(
+            "xscope_usage_queue",
+            "Volatile HTTP usage queue; abrupt process loss cannot be counted locally",
+        ),
+        &["kind"],
+    )
+    .unwrap();
     let requests = IntCounterVec::new(
         Opts::new(
             "xscope_http_requests_total",
@@ -295,7 +306,10 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     )
     .unwrap();
     let events = IntCounterVec::new(
-        Opts::new("xscope_background_events_total", "WAL and quota outcomes"),
+        Opts::new(
+            "xscope_background_events_total",
+            "Usage delivery, billing, quota and platform worker outcomes",
+        ),
         &["operation", "outcome"],
     )
     .unwrap();
@@ -315,16 +329,18 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         &["pool", "reason"],
     )
     .unwrap();
-    let wal_storage = IntGaugeVec::new(
+    let event_worker_state = IntGaugeVec::new(
         Opts::new(
-            "xscope_wal_storage_bytes",
-            "Gateway retained data, in-flight space reservations and filesystem watermarks",
+            "xscope_event_worker_state",
+            "Financial consumer queue totals and oldest pending event age; no tenant labels",
         ),
-        &["kind"],
+        &["state", "kind"],
     )
     .unwrap();
     for collector in [
-        Box::new(wal_storage.clone()) as Box<dyn prometheus::core::Collector>,
+        Box::new(pending_hold_age.clone()) as Box<dyn prometheus::core::Collector>,
+        Box::new(usage_queue.clone()) as Box<dyn prometheus::core::Collector>,
+        Box::new(event_worker_state.clone()) as Box<dyn prometheus::core::Collector>,
         Box::new(requests.clone()) as Box<dyn prometheus::core::Collector>,
         Box::new(inflight.clone()),
         Box::new(duration.clone()),
@@ -336,7 +352,9 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         registry.register(collector).unwrap();
     }
     Metrics {
-        wal_storage,
+        pending_hold_age,
+        usage_queue,
+        event_worker_state,
         registry,
         requests,
         inflight,
@@ -355,21 +373,51 @@ pub fn background_event(operation: &'static str, outcome: &'static str) {
         .inc();
 }
 
-/// Bounded labels, sampled when Gateway checks admission/readiness.
-pub fn wal_storage(retained: u64, reserved: u64, free: u64, limit: u64, floor: u64) {
+pub fn pending_hold_age(state: &str, seconds: i64) {
+    if matches!(state, "reserved" | "dispatched") {
+        METRICS
+            .pending_hold_age
+            .with_label_values(&[state])
+            .set(seconds.max(0));
+    }
+}
+
+pub fn usage_queue(
+    occupied: usize,
+    pending: usize,
+    oldest_seconds: u64,
+    capacity: usize,
+    ready: bool,
+) {
     for (kind, value) in [
-        ("retained", retained),
-        ("reserved", reserved),
-        ("free", free),
-        ("limit", limit),
-        ("free_floor", floor),
+        ("occupied", occupied as u64),
+        ("pending", pending as u64),
+        ("oldest_seconds", oldest_seconds),
+        ("capacity", capacity as u64),
+        ("ready", u64::from(ready)),
     ] {
         METRICS
-            .wal_storage
+            .usage_queue
             .with_label_values(&[kind])
             .set(i64::try_from(value).unwrap_or(i64::MAX));
     }
 }
+
+pub fn event_worker_state(state: &str, jobs: i64, backlog: i64, oldest_seconds: i64) {
+    if matches!(state, "pending" | "running" | "idle" | "dead") {
+        for (kind, value) in [
+            ("jobs", jobs),
+            ("backlog", backlog),
+            ("oldest_seconds", oldest_seconds),
+        ] {
+            METRICS
+                .event_worker_state
+                .with_label_values(&[state, kind])
+                .set(value.max(0));
+        }
+    }
+}
+
 pub fn tokens(input: u64, output: u64) {
     METRICS.tokens.with_label_values(&["input"]).inc_by(input);
     METRICS.tokens.with_label_values(&["output"]).inc_by(output);

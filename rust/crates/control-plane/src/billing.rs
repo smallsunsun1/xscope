@@ -21,6 +21,34 @@ use crate::{
 
 const HELD: [&str; 2] = ["reserved", "dispatched"];
 
+pub async fn monitor_pending(
+    repository: Repository,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => return,
+            _ = tick.tick() => {
+                for state in HELD {
+                    // Two index seeks, not a count/scan of the financial history.
+                    let query = reservation::Entity::find()
+                        .select_only().column(reservation::Column::CreatedAt)
+                        .filter(reservation::Column::State.eq(state))
+                        .order_by_asc(reservation::Column::CreatedAt).limit(1)
+                        .into_tuple::<chrono::DateTime<chrono::FixedOffset>>().one(&repository.db);
+                    let result = tokio::select! { _ = shutdown.changed() => return, result = query => result };
+                    match result {
+                        Ok(oldest) => xscope_telemetry::pending_hold_age(state, oldest.map(|t| (Utc::now() - t.with_timezone(&Utc)).num_seconds()).unwrap_or(0)),
+                        Err(_) => xscope_telemetry::background_event("billing_pending_monitor", "error"),
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub use crate::billing_feed::{AckRequest, PollRequest};
 pub use xscope_domain::billing::{ReserveRequest, SettleRequest};
 
@@ -137,10 +165,60 @@ pub(crate) async fn append_event(
     }
     .insert(tx)
     .await?;
+    crate::event_worker::schedule(tx, account_id, sequence).await?;
     Ok(())
 }
 
 impl Repository {
+    pub async fn unresolved_money(
+        &self,
+        project: &str,
+        id: &str,
+        request: xscope_domain::billing::UnresolvedRequest,
+    ) -> ServiceResult<reservation::Model> {
+        if !identifier(&request.event_id)
+            || !matches!(
+                request.reason.as_str(),
+                "usage_missing" | "usage_over_limit"
+            )
+            || (request.reason == "usage_missing"
+                && (request.input_tokens.is_some() || request.output_tokens.is_some()))
+            || (request.reason == "usage_over_limit"
+                && (request.input_tokens.is_none() || request.output_tokens.is_none()))
+        {
+            return Err(invalid("invalid unresolved usage report"));
+        }
+        let tx = self.db.begin().await?;
+        let account = lock_account(&tx, project).await?;
+        let row = reservation::Entity::find_by_id(id)
+            .filter(reservation::Column::ProjectId.eq(project))
+            .one(&tx)
+            .await?
+            .ok_or(ServiceError::NotFound)?;
+        if matches!(row.state.as_str(), "settled" | "waived") {
+            tx.commit().await?;
+            return Ok(row);
+        }
+        if row.state != "dispatched" {
+            return Err(conflict("unresolved usage requires dispatched reservation"));
+        }
+        let payload = json_value(&request)?;
+        if let Some(previous) = &row.completion {
+            if previous != &payload {
+                return Err(conflict("unresolved evidence changed"));
+            }
+            tx.commit().await?;
+            return Ok(row);
+        }
+        let mut active: reservation::ActiveModel = row.into();
+        active.completion = Set(Some(payload.clone()));
+        active.updated_at = Set(Utc::now().fixed_offset());
+        let row = active.update(&tx).await?;
+        append_event(&tx, &account.id, "reservation.unresolved", id, payload).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
     pub async fn reserve_money(
         &self,
         request: ReserveRequest,
@@ -191,17 +269,20 @@ impl Repository {
             || key.tenant_id != request.tenant_id
             || key.revoked_at.is_some()
             || key.expires_at.is_some_and(|t| t <= now.fixed_offset())
-            || !key.scopes.iter().any(|s| s == "chat.completions")
+            || !key
+                .scopes
+                .iter()
+                .any(|s| matches!(s.as_str(), "chat.completions" | "completions"))
             || !key.allowed_models.contains(&request.model_id)
         {
             return Err(ServiceError::Forbidden);
         }
-        if request.model_id != self.model.id
-            || request.price_version != self.model.price_version
+        let model = crate::catalog::active_model(&tx, &request.model_id).await?;
+        if request.price_version != model.price_version
             || request
                 .input_token_limit
                 .checked_add(request.output_token_limit)
-                .is_none_or(|v| v == 0 || v > self.model.max_context_tokens)
+                .is_none_or(|v| v == 0 || v > model.max_context_tokens)
         {
             return Err(invalid("unknown price/model or invalid context bounds"));
         }
@@ -221,7 +302,7 @@ impl Repository {
             return Err(conflict("request identity has already been used"));
         }
         let amount = usage_cost_microunits(
-            &self.model,
+            &model,
             request.input_token_limit,
             request.output_token_limit,
         )?;
@@ -271,7 +352,7 @@ impl Repository {
             api_key_id: Set(request.api_key_id),
             request_id: Set(request.request_id),
             spec: Set(spec),
-            price: Set(json_value(&self.model)?),
+            price: Set(json_value(&model)?),
             reserved_microunits: Set(amount),
             settled_microunits: Set(None),
             state: Set("reserved".into()),
@@ -287,7 +368,7 @@ impl Repository {
             &account.id,
             "reservation.created",
             &row.id,
-            json!({"reserved_microunits": amount, "price_version": self.model.price_version}),
+            json!({"reserved_microunits": amount, "price_version": model.price_version}),
         )
         .await?;
         tx.commit().await?;
@@ -391,17 +472,6 @@ impl Repository {
         id: &str,
         request: SettleRequest,
     ) -> ServiceResult<reservation::Model> {
-        if request.input_tokens < 0
-            || request.output_tokens < 0
-            || request.latency_ms < 0
-            || !identifier(&request.endpoint_id)
-            || !identifier(&request.region)
-            || !["succeeded", "cancelled", "provider_error"].contains(&request.status.as_str())
-        {
-            return Err(invalid(
-                "settlement requires known, nonnegative usage and a final outcome",
-            ));
-        }
         let tx = self.db.begin().await?;
         let account = lock_account(&tx, project).await?;
         let row = reservation::Entity::find_by_id(id)
@@ -409,99 +479,122 @@ impl Repository {
             .one(&tx)
             .await?
             .ok_or(ServiceError::NotFound)?;
-        let payload = json_value(&request)?;
-        if row.state == "settled" {
-            if row.completion.as_ref() != Some(&payload) {
-                return Err(conflict("settlement payload changed"));
-            }
-            tx.commit().await?;
-            return Ok(row);
-        }
-        if row.state != "dispatched" {
-            return Err(conflict("settlement requires a dispatched reservation"));
-        }
-        let spec: ReserveRequest = serde_json::from_value(row.spec.clone())
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
-        if request.input_tokens > spec.input_token_limit
-            || request.output_tokens > spec.output_token_limit
-        {
-            return Err(conflict(
-                "actual usage exceeds reserved bounds; hold retained for reconciliation",
-            ));
-        }
-        let price: Model = serde_json::from_value(row.price.clone())
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
-        let amount = usage_cost_microunits(&price, request.input_tokens, request.output_tokens)?;
-        let now = Utc::now().fixed_offset();
-        let usage_id = format!("evt-reservation-{id}");
-        let monthly = crate::billing_projection::monthly(
-            &tx,
-            &row.api_key_id,
-            crate::billing_projection::month(now.date_naive()),
-        )
-        .await?;
-        crate::billing_projection::change_hold(
-            &tx,
-            &account.id,
-            &row.api_key_id,
-            -row.reserved_microunits,
-        )
-        .await?;
-        usage_event::ActiveModel {
-            event_id: Set(usage_id.clone()),
-            request_id: Set(row.request_id.clone()),
-            occurred_at: Set(now),
-            tenant_id: Set(row.tenant_id.clone()),
-            project_id: Set(row.project_id.clone()),
-            api_key_id: Set(row.api_key_id.clone()),
-            model_id: Set(spec.model_id),
-            model_revision: Set(spec.model_revision),
-            endpoint_id: Set(request.endpoint_id),
-            region: Set(request.region),
-            price_version: Set(price.price_version),
-            input_tokens: Set(request.input_tokens),
-            output_tokens: Set(request.output_tokens),
-            cached_input_tokens: Set(0),
-            latency_ms: Set(request.latency_ms),
-            status: Set(request.status),
-            cost_amount: Set(ceil_minor_units(amount)),
-            cost_microunits: Set(amount),
-            currency: Set(account.currency.clone()),
-            received_at: Set(now),
-        }
-        .insert(&tx)
-        .await?;
-        crate::billing_projection::change_spend(&tx, monthly, amount).await?;
-        let mut active: reservation::ActiveModel = row.into();
-        active.state = Set("settled".into());
-        active.settled_microunits = Set(Some(amount));
-        active.completion = Set(Some(payload));
-        active.updated_at = Set(now);
-        let row = active.update(&tx).await?;
-        if amount > 0 {
-            insert_balanced_entries(
-                &tx,
-                &account,
-                &row.tenant_id,
-                "usage",
-                "usage_event",
-                &usage_id,
-                &format!("reservation:{id}"),
-                "Reserved model inference usage",
-                -amount,
-                "usage_revenue",
-            )
-            .await?;
-        }
-        append_event(
-            &tx,
-            &account.id,
-            "reservation.settled",
-            id,
-            json!({"usage_event_id": usage_id, "settled_microunits": amount}),
-        )
-        .await?;
+        let result = settle_locked(&tx, &account, row, request).await?;
         tx.commit().await?;
-        Ok(row)
+        Ok(result)
     }
+}
+
+/// Shared by Gateway settlement and reviewed recovery. Caller holds the account
+/// lock and commits settlement, review decision and audit in the SAME transaction.
+pub(crate) async fn settle_locked(
+    tx: &DatabaseTransaction,
+    account: &billing_account::Model,
+    row: reservation::Model,
+    request: SettleRequest,
+) -> ServiceResult<reservation::Model> {
+    let id = row.id.clone();
+    if request.input_tokens < 0
+        || request.output_tokens < 0
+        || request.latency_ms < 0
+        || !identifier(&request.endpoint_id)
+        || !identifier(&request.region)
+        || !["succeeded", "cancelled", "provider_error"].contains(&request.status.as_str())
+    {
+        return Err(invalid(
+            "settlement requires known, nonnegative usage and a final outcome",
+        ));
+    }
+    let payload = json_value(&request)?;
+    if row.state == "settled" {
+        if row.completion.as_ref() != Some(&payload) {
+            return Err(conflict("settlement payload changed"));
+        }
+        return Ok(row);
+    }
+    if row.state != "dispatched" {
+        return Err(conflict("settlement requires a dispatched reservation"));
+    }
+    let spec: ReserveRequest = serde_json::from_value(row.spec.clone())
+        .map_err(|e| ServiceError::Internal(e.to_string()))?;
+    if request.input_tokens > spec.input_token_limit
+        || request.output_tokens > spec.output_token_limit
+    {
+        return Err(conflict(
+            "actual usage exceeds reserved bounds; hold retained for reconciliation",
+        ));
+    }
+    let price: Model = serde_json::from_value(row.price.clone())
+        .map_err(|e| ServiceError::Internal(e.to_string()))?;
+    let amount = usage_cost_microunits(&price, request.input_tokens, request.output_tokens)?;
+    let now = Utc::now().fixed_offset();
+    let usage_id = format!("evt-reservation-{id}");
+    let monthly = crate::billing_projection::monthly(
+        tx,
+        &row.api_key_id,
+        crate::billing_projection::month(now.date_naive()),
+    )
+    .await?;
+    crate::billing_projection::change_hold(
+        tx,
+        &account.id,
+        &row.api_key_id,
+        -row.reserved_microunits,
+    )
+    .await?;
+    usage_event::ActiveModel {
+        event_id: Set(usage_id.clone()),
+        request_id: Set(row.request_id.clone()),
+        occurred_at: Set(now),
+        tenant_id: Set(row.tenant_id.clone()),
+        project_id: Set(row.project_id.clone()),
+        api_key_id: Set(row.api_key_id.clone()),
+        model_id: Set(spec.model_id),
+        model_revision: Set(spec.model_revision),
+        endpoint_id: Set(request.endpoint_id),
+        region: Set(request.region),
+        price_version: Set(price.price_version),
+        input_tokens: Set(request.input_tokens),
+        output_tokens: Set(request.output_tokens),
+        cached_input_tokens: Set(0),
+        latency_ms: Set(request.latency_ms),
+        status: Set(request.status),
+        cost_amount: Set(ceil_minor_units(amount)),
+        cost_microunits: Set(amount),
+        currency: Set(account.currency.clone()),
+        received_at: Set(now),
+    }
+    .insert(tx)
+    .await?;
+    crate::billing_projection::change_spend(tx, monthly, amount).await?;
+    let mut active: reservation::ActiveModel = row.into();
+    active.state = Set("settled".into());
+    active.settled_microunits = Set(Some(amount));
+    active.completion = Set(Some(payload));
+    active.updated_at = Set(now);
+    let row = active.update(tx).await?;
+    if amount > 0 {
+        insert_balanced_entries(
+            tx,
+            account,
+            &row.tenant_id,
+            "usage",
+            "usage_event",
+            &usage_id,
+            &format!("reservation:{id}"),
+            "Reserved model inference usage",
+            -amount,
+            "usage_revenue",
+        )
+        .await?;
+    }
+    append_event(
+        tx,
+        &account.id,
+        "reservation.settled",
+        &id,
+        json!({"usage_event_id": usage_id, "settled_microunits": amount}),
+    )
+    .await?;
+    Ok(row)
 }

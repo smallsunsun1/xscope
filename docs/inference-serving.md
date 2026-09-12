@@ -3,7 +3,7 @@
 The cluster path is:
 
 ```text
-client -> Pingora (key/model/quota, SSE, WAL)
+client -> Pingora (key/model/quota, SSE, HTTP usage reporting)
        -> inference-serving Service
           -> Envoy -> llm-d EPP (ext_proc) -> selected Runtime Pod
                          ^
@@ -71,10 +71,11 @@ latency predictor, or monitoring stack is installed.
   is disabled for SSE, idle streams time out after 300 seconds. No inference
   POST retry policy or direct-Pod fallback is configured. EPP errors fail closed.
   Pingora connection establishment is bounded (3 seconds TCP / 5 seconds total).
-  If no serving backend is healthy, gateway readiness fails; Kubernetes may
-  remove all public Service endpoints, in which case NodePort clients can see
-  connection failure/timeout rather than an HTTP response. The gateway itself
-  returns 503 when reached directly in this state.
+  In model-catalog mode, Gateway readiness reflects keys and billing delivery,
+  not one default model's health: an unavailable model fails its own requests
+  without removing unrelated models from the public Service. Legacy snapshots
+  without a catalog retain the default-entry readiness check. Monitor Runtime
+  and serving-entry health separately; catalog registration is not health proof.
 - NetworkPolicies restrict serving HTTP ingress to Pingora and Runtime ingress
   to serving/control-plane probes. Enforcement requires a NetworkPolicy-capable
   CNI; YAML alone cannot guarantee enforcement on Docker Desktop.
@@ -98,8 +99,8 @@ kubectl -n xscope-system get inferencepool demo-pool
 kubectl -n xscope-system logs deployment/inference-serving -c envoy --tail=20
 ```
 
-The smoke uses `xscope-local-secret` by default; `XSCOPE_TEST_API_KEY` can override
-it with a key allowing xscope-demo. It verifies 401/403, SSE incrementality and
+The smoke reads a test key from Kubernetes Secret at runtime; `XSCOPE_TEST_API_KEY`
+can override it in the runtime child, never in Bazel action env. It verifies 401/403, SSE incrementality and
 final usage, spoofed destination stripping, JSON completion, cancellation in
 Runtime logs, selected endpoint in serving logs and persisted usage outcomes.
 It is deliberately restricted to the current `docker-desktop` context.

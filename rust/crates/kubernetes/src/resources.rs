@@ -166,6 +166,7 @@ mod tests {
         )
         .unwrap();
         model.spec.autoscaling = Some(AutoscalingSpec {
+            managed: false,
             min_replicas: 1,
             max_replicas: 3,
             target_pending_requests: 0,

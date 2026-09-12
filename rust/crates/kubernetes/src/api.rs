@@ -51,6 +51,23 @@ pub struct RuntimeSpec {
     pub port: i32,
     #[serde(default)]
     pub arguments: Vec<String>,
+    /// Runtime-owned readiness contract; use /health for engines such as vLLM.
+    #[serde(default)]
+    pub health: RuntimeHealth,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeHealth {
+    pub path: String,
+    pub startup_timeout_seconds: i32,
+}
+impl Default for RuntimeHealth {
+    fn default() -> Self {
+        Self {
+            path: "/readyz".into(),
+            startup_timeout_seconds: 1800,
+        }
+    }
 }
 fn default_port() -> i32 {
     8000
@@ -58,6 +75,9 @@ fn default_port() -> i32 {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AutoscalingSpec {
+    /// KEDA writes a recommendation; only the control plane applies replicas.
+    #[serde(default)]
+    pub managed: bool,
     #[serde(default = "one")]
     pub min_replicas: i32,
     #[serde(default)]
@@ -201,7 +221,24 @@ pub fn validate(model: &mut ModelDeployment) -> Result<(), Error> {
             "invalid runtime port or negative replicas".into(),
         ));
     }
+    if !spec.runtime.health.path.starts_with('/')
+        || spec.runtime.health.path.starts_with("//")
+        || spec.runtime.health.path.len() > 256
+        || !spec
+            .runtime
+            .health
+            .path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+        || !(10..=7200).contains(&spec.runtime.health.startup_timeout_seconds)
+        || spec.runtime.health.startup_timeout_seconds % 5 != 0
+    {
+        return Err(Error::Invalid("runtime health requires a local HTTP path and startup timeout 10..7200 seconds in multiples of five".into()));
+    }
     if let Some(scaling) = &spec.autoscaling {
+        if scaling.managed && (spec.serving.is_none() || (scaling.target_pending_requests==0 && scaling.target_running_requests==0)) {
+            return Err(Error::Invalid("managed scaling requires a serving pool and EPP request metrics".into()));
+        }
         if scaling.min_replicas < 1
             || scaling.max_replicas < scaling.min_replicas
             || spec.replicas < scaling.min_replicas
@@ -277,6 +314,44 @@ pub(crate) fn example() -> ModelDeployment {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_startup_readiness_is_engine_specific_and_bounded() {
+        let mut model = example();
+        model.spec.runtime.health.path = "/health".into();
+        model.spec.runtime.health.startup_timeout_seconds = 600;
+        validate(&mut model).unwrap();
+        let (deployment, _) = crate::controller::desired(&model, "local", "local", None).unwrap();
+        let pod = deployment.spec.unwrap().template.spec.unwrap();
+        let runtime = &pod.containers[0];
+        assert_eq!(
+            runtime.startup_probe.as_ref().unwrap().failure_threshold,
+            Some(120)
+        );
+        assert_eq!(
+            runtime
+                .readiness_probe
+                .as_ref()
+                .unwrap()
+                .http_get
+                .as_ref()
+                .unwrap()
+                .path
+                .as_deref(),
+            Some("/health")
+        );
+        for path in [
+            "//external",
+            "http://external",
+            "/health?token=private",
+            "/health\r\n",
+        ] {
+            model.spec.runtime.health.path = path.into();
+            assert!(validate(&mut model).is_err());
+        }
+        model.spec.runtime.health.path = "/health".into();
+        model.spec.runtime.health.startup_timeout_seconds = 601;
+        assert!(validate(&mut model).is_err());
+    }
     #[test]
     fn compatible_defaults_and_validation() {
         let mut model = example();

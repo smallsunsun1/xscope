@@ -1,5 +1,11 @@
 # XScope
 
+2026-09-12 开发增量：新增 [受管 Pool 自动注册、Gateway ACK、排空和 UID 手动缩容](docs/managed-traffic.md)，只适用于独占受管入口。代码尚未部署，不将离线视为零在途，也未开启 KEDA 自动缩容。
+
+2026-09-11 开发增量：新增数据库模型目录与不可变价格版本、Gateway 请求体多模型路由、发布暂停/提升/历史回滚，以及 Runtime 可配置启动就绪探针。接口和测试见 [模型目录与发布](docs/model-catalog.md)。本次代码尚未部署，自动注册与安全排空等剩余规划不视为完成。
+
+2026-09-06 用量投递更新：Gateway 仅采用 **HTTP + 有界内存重试**，不依赖 SQLite/WAL/PVC；控制面仍通过 SeaORM/PostgreSQL 幂等记账。未知用量新增双人审核损失豁免，绝不自动超时解冻。配置、故障边界、测试与旧 WAL 安全切换见 [轻量投递方案](docs/usage-delivery.md)。旧集群首次部署请先阅读切换步骤，不能用删除历史 PVC 的方式迁移。
+
 项目级灰度路由已接入：本地控制台 [流量路由](http://localhost:30081/#/routing) 支持请求头规则、Stable/Canary 权重和版本冲突保护。使用方式及当前 echo 模型限制见 [RoutePolicy 指南](docs/route-policy.md)。
 
 模型弹性采用 KEDA ScaledObject 单入口，Operator 不再直接生成 HPA；GPU/SLO 策略、资源池准入和安全缩容按阶段推进。当前实现范围、安装及验证见 [KEDA 接入](docs/keda-autoscaling.md)。
@@ -10,7 +16,7 @@ XScope 是一个面向大模型 API 的云原生服务平台。源码按语言�
 
 | 目录 | 工具链 | 职责 |
 | --- | --- | --- |
-| `rust/crates/gateway` | Rust workspace、Pingora 0.8、Redis、rules_rust | 鉴权、全局 RPM/TPM、HTTP/SSE 代理、取消传播、usage WAL |
+| `rust/crates/gateway` | Rust workspace、Pingora 0.8、Redis、rules_rust | 鉴权、全局 RPM/TPM、HTTP/SSE 代理、取消传播、有界 HTTP 用量上报 |
 | `rust/crates/control-plane` | Axum、SeaORM、PostgreSQL、rules_rust | 身份/租户、项目/API Key、计量、订单、支付退款、账本、发票和管理 API |
 | `rust/crates/{domain,entities,migration}` | Rust workspace、SeaORM 2 | 业务领域、数据库实体和版本化迁移 |
 | `rust/crates/cluster-agent` | Axum、kube-rs | 控制面与成员 Kubernetes 集群之间的窄权限 API |
@@ -71,19 +77,12 @@ bazel run -- @pnpm//:pnpm --dir "$PWD/web" dev
 仅做本机传输调试时，可直接启动开发 runtime，并把它作为测试 serving 入口（不经过 EPP；集群部署使用下面的 InferencePool 链路）：
 
 ```bash
-bazel run //python:runtime
-
-XSCOPE_API_KEYS_JSON='[{"id":"key-local","tenant_id":"tenant-local","project_id":"project-local","secret":"xscope-local-secret"}]' \
-XSCOPE_SERVING_ENTRY_JSON='{"id":"test-pool","model":"xscope-demo","address":"127.0.0.1:8090"}' \
-bazel run //rust/crates/gateway
-
-curl http://127.0.0.1:8080/v1/chat/completions \
-  # Authorization credentials are supplied from a runtime secret.
-  -H 'Content-Type: application/json' \
-  -d '{"model":"xscope-demo","messages":[{"role":"user","content":"hello"}]}'
+bazel test //rust/crates/gateway:gateway_test //tools:streaming_e2e_test
+# 已部署的本地集群：运行时从 Kubernetes Secret 读取测试 Key，不打印它。
+bazel run //tools:inference_cluster_smoke
 ```
 
-Pingora 在内存中只保留 Key 的 SHA-256 摘要，并校验 Scope、允许模型、过期时间、月预算和预付余额。网关从控制面的内部接口轮询策略并原子替换 last-known-good 快照；静态 Key 仅作为启动回退。多网关副本通过 Redis Lua 原子预占 RPM/TPM，并在响应后按真实 token 回补。通过策略校验的请求会先把 usage 写入 append-only WAL，再异步上报；Kubernetes 部署中的 WAL 位于持久卷 `/var/lib/xscope/usage-wal/events.jsonl`。Rust 控制面通过 SeaORM 以 `event_id` 幂等写入 PostgreSQL，并生成精确到微分单位的双分录。
+Pingora 在内存中只保留 Key 的 SHA-256 摘要，并校验 Scope、允许模型、过期时间、月预算和预付余额。网关从控制面的内部接口轮询策略并原子替换 last-known-good 快照；静态 Key 仅作为启动回退。多网关副本通过 Redis Lua 原子预占 RPM/TPM，并在响应后按真实 token 回补。资金模式先通过控制面的事务预占/派发，再转发推理；完成后由有界内存队列通过 HTTP 上报。Rust 控制面以 reservation/payload（开发 v1 接口以 `event_id`）幂等写入 PostgreSQL 并生成精确双分录。Gateway 强杀可能丢失未确认用量，中央冻结不自动释放，见 [故障边界](docs/usage-delivery.md)。
 
 推理请求支持 `stream: true`，逐块透传 SSE，并在客户端断开时取消上游请求。计量解析使用 `sse-core`，不拼接整段输出；未知 usage 不再作为 0 token 成功请求处理。协议、测试和计费边界见 [流式推理说明](docs/streaming.md)。
 
@@ -123,10 +122,7 @@ kubectl logs -n xscope-system deployment/gateway -f
 kubectl logs -n xscope-system deployment/control-plane -f
 ```
 
-Docker Desktop 本地初始凭据仅用于开发：控制台用户 `platform-admin` / `xscope-local-admin`，
-Keycloak 管理员 `admin` / `xscope-local-keycloak-admin`，推理 API Key
-`xscope-local-secret`。这些值位于 `deploy/k8s/overlays/local/secrets.yaml`，不得用于共享或
-生产集群。
+本地初始凭据在首次部署时随机生成并存入 Kubernetes Secret，后续部署保留现有值；仓库不保存可用密码或 API Key。控制台用户为 `platform-admin`，Keycloak 管理员为 `admin`。在本机受信任终端或 Kubernetes 管理工具中查看相应 Secret，勿把值复制到聊天、提交、截图或构建环境。详见 [仓库安全规则](docs/repository-security.md)。
 
 Rust 服务统一使用 `tracing`；本地 Kubernetes overlay 输出 JSON 日志。可通过 `RUST_LOG` 调整
 target 过滤规则，并通过 `XSCOPE_LOG_FORMAT=compact|json` 选择输出格式。
@@ -149,8 +145,8 @@ bazel run //rust/crates/operator
 1. 已完成：Rust/Axum/SeaORM 控制面、PostgreSQL 账号与租户成员、项目/API Key、模型目录和报价，以及 Ant Design 管理台。
 2. Rust 控制面经 kube-rs cluster-agent 创建/版本化更新/扩缩/删除 `ModelDeployment`；独立 Rust Operator 管理 Runtime、HPA、PDB、InferencePool，并保留安装层 llm-d/EPP 所有权，业务控制面仍不持有 Kubernetes 凭证。配置、发布边界和验收命令见 [Operator 生命周期](docs/operator-lifecycle.md)。
 3. 已完成初版：Pingora 执行 Scope、模型、过期、月预算、余额门禁；Redis Lua 在所有网关副本间执行 RPM/TPM 预占与结算。
-4. 已完成初版：usage 持久化 WAL、至少一次上报、数据库幂等去重、精确费用、手工充值/支付/退款记录、双分录、发票记录和渠道对账记录。新增 WAL checkpoint、Redis 配额幂等恢复，以及 [Gateway 资金预占/派发/结算与事务 Outbox](docs/billing-protocol.md)；未知用量保留冻结，正式供应商证据对账和真实支付/税务渠道仍待接入，见 [可靠性边界](docs/billing-recovery.md)。
-5. 按顺序推进：SSE/取消 → InferencePool/llm-d EPP → RoutePolicy/stable-canary → HPA/PDB/资源所有权 → 计费预占/WAL checkpoint/事件流 → 多集群 → 可观测性/审计 → 正式支付税务与更多推理 API。验收状态见 `docs/implementation-sequence.md`。
+4. 已完成初版：HTTP 有界重试上报、数据库幂等去重、精确费用、手工充值/支付/退款记录、双分录、发票记录和渠道对账记录。已接入中央未决证据、双人审核豁免、Redis 配额幂等恢复，以及 [Gateway 资金预占/派发/结算与事务 Outbox](docs/billing-protocol.md)；未知用量保留冻结，正式供应商证据对账和真实支付/税务渠道仍待接入，见 [可靠性边界](docs/billing-recovery.md)。
+5. 按顺序推进：SSE/取消 → InferencePool/llm-d EPP → RoutePolicy/stable-canary → HPA/PDB/资源所有权 → 计费预占/HTTP 幂等上报/事件流 → 多集群 → 可观测性/审计 → 正式支付税务与更多推理 API。验收状态见 `docs/implementation-sequence.md`。
 
 ## 工程约定
 

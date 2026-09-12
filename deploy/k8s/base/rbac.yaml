@@ -38,6 +38,9 @@ metadata:
   name: xscope-operator
 rules:
   - apiGroups: [platform.xscope.io]
+    resources: [modelscales, modelscales/status]
+    verbs: [get, list, watch, create, patch, delete]
+  - apiGroups: [platform.xscope.io]
     resources: [modeldeployments]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [platform.xscope.io]

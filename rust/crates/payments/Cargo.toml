@@ -1,0 +1,22 @@
+[package]
+name = "xscope-payments"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aws-lc-rs.workspace = true
+base64.workspace = true
+chrono.workspace = true
+pem.workspace = true
+reqwest = { workspace = true, features = ["rustls", "stream", "form"] }
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+serde_urlencoded.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

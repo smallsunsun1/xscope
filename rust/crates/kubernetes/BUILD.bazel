@@ -7,7 +7,7 @@ rust_library(
     aliases = aliases(),
     edition = crate_edition(),
     proc_macro_deps = all_crate_deps(proc_macro = True),
-    deps = ["//rust/crates/telemetry"] + all_crate_deps(normal = True),
+    deps = ["//rust/crates/domain", "//rust/crates/telemetry"] + all_crate_deps(normal = True),
     visibility = ["//visibility:public"],
 )
 rust_test(

@@ -16,6 +16,22 @@ from observability_cluster import eventually, forward, kubectl, local_only, requ
 
 def main():
     local_only()
+    # New financial review routes stay behind the public identity middleware.
+    # Do not fabricate a console identity or create/approve live evidence.
+    with forward("control-plane", 8081) as base:
+        for method, path in [
+            ("GET", "/billing/accounts/project-local/reservations/unknown/reviews"),
+            ("GET", "/billing/accounts/project-local/reviews/unknown"),
+            ("POST", "/billing/accounts/project-local/reviews/unknown/decision"),
+        ]:
+            req = urllib.request.Request(base + "/admin/v1" + path, method=method,
+                data=None if method == "GET" else b"{}", headers={"Content-Type": "application/json"})
+            try:
+                urllib.request.urlopen(req, timeout=5)
+                raise AssertionError("review API accepted an anonymous request")
+            except urllib.error.HTTPError as error:
+                assert error.code == 401, error.code
+    print("PASS deployed review routes require console identity; no live evidence submitted or approved.")
     token = base64.b64decode(kubectl("get", "secret", "xscope-platform-secrets", "-o", "jsonpath={.data.internal-token}")).decode()
     with forward("control-plane", 8084) as base:
         try:
@@ -30,7 +46,8 @@ def main():
         except urllib.error.HTTPError as error:
             assert error.code == 422
     request_id = "money-outbox-" + uuid.uuid4().hex
-    key = os.environ.get("XSCOPE_TEST_API_KEY", "xscope-local-secret")
+    from observability_cluster import inference_api_key
+    key = inference_api_key()
     req = urllib.request.Request("http://localhost:30082/v1/chat/completions", data=json.dumps({"model": "xscope-demo", "stream": False,
         "messages": [{"role": "user", "content": "verify transactional usage outbox"}]}).encode(), headers={"Content-Type": "application/json", "Authorization": "Bearer " + key, "X-Request-Id": request_id})
     with urllib.request.urlopen(req, timeout=15) as response:

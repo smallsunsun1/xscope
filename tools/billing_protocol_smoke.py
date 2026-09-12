@@ -22,6 +22,13 @@ import uuid
 from python.runfiles import runfiles
 from billing_cursor_checks import verify as verify_cursors
 from billing_projection_checks import verify as verify_projections, snapshot as projection_snapshot
+from billing_review_checks import verify as verify_reviews
+from event_worker_checks import verify as verify_workers, verify_console as verify_worker_console
+from cluster_protocol_checks import verify as verify_clusters, verify_console as verify_cluster_console
+from cluster_pull_checks import verify as verify_cluster_pull
+from payment_checks import verify as verify_payments
+from model_catalog_checks import verify as verify_catalog
+from managed_traffic_checks import verify as verify_managed_traffic
 
 
 def port():
@@ -62,14 +69,14 @@ def main():
             def sql(statement):
                 return subprocess.check_output(["docker", "exec", container, "psql", "-U", "postgres", "-At", "-v", "ON_ERROR_STOP=1", "-c", statement], text=True).strip()
 
-            def api(method, path, payload=None, replica=0, internal=True, authenticated=True):
+            def api(method, path, payload=None, replica=0, internal=True, authenticated=True, credential=None):
                 public, private, _ = configs[replica]
                 prefix = "/internal/v1" if internal else "/admin/v1"
                 headers = {"Content-Type": "application/json", "Idempotency-Key": "smoke-" + uuid.uuid4().hex}
                 if internal and authenticated:
-                    headers["Authorization"] = "Bearer " + token
+                    headers["Authorization"] = "Bearer " + (credential or token)
                 req = urllib.request.Request(f"http://127.0.0.1:{private if internal else public}" + prefix + path,
-                    method=method, headers=headers, data=None if payload is None else json.dumps(payload).encode())
+                    method=method, headers=headers, data=payload if isinstance(payload, bytes) else None if payload is None else json.dumps(payload).encode())
                 try:
                     with urllib.request.urlopen(req, timeout=10) as response:
                         return response.status, json.loads(response.read() or "null")
@@ -96,15 +103,15 @@ def main():
                 public, private = port(), port()
                 env = dict(os.environ, XSCOPE_DATABASE_URL=f"postgres://postgres:{token}@127.0.0.1:{pg_port}/postgres",
                     XSCOPE_INTERNAL_TOKEN=token, XSCOPE_CONTROL_ADDRESS=f"127.0.0.1:{public}", XSCOPE_CONTROL_INTERNAL_ADDRESS=f"127.0.0.1:{private}",
-                    XSCOPE_METRICS_ADDRESS=f"127.0.0.1:{port()}", XSCOPE_CONSOLE_AUTH="disabled", XSCOPE_BOOTSTRAP_API_KEYS_JSON="[]", XSCOPE_DEFAULT_TENANT_ID="test-tenant")
+                    XSCOPE_METRICS_ADDRESS=f"127.0.0.1:{port()}", XSCOPE_EVENT_WORKER_ENABLED="false", XSCOPE_CONSOLE_AUTH="disabled", XSCOPE_BOOTSTRAP_API_KEYS_JSON="[]", XSCOPE_DEFAULT_TENANT_ID="test-tenant")
                 env.pop("XSCOPE_CONSOLE_DIR", None)
                 configs.append((public, private, env))
                 launch(index)
 
-            def setup(project, funded=False, budget=0):
+            def setup(project, funded=False, budget=0, scopes=None):
                 assert api("POST", "/projects", {"id": project, "tenant_id": "test-tenant", "name": project}, internal=False)[0] == 201
                 status, result = api("POST", "/api-keys", {"id": "key-" + project, "project_id": project, "tenant_id": "test-tenant", "name": "test",
-                    "scopes": ["chat.completions"], "allowed_models": ["xscope-demo"], "monthly_budget": {"currency": "CNY", "amount": budget}}, internal=False)
+                    "scopes": scopes or ["chat.completions"], "allowed_models": ["xscope-demo"], "monthly_budget": {"currency": "CNY", "amount": budget}}, internal=False)
                 assert status == 201, result
                 if funded:
                     assert api("POST", "/billing/orders", {"id": "order-" + project, "project_id": project, "tenant_id": "test-tenant", "amount": {"currency": "CNY", "amount": 1}}, internal=False)[0] == 201
@@ -209,7 +216,7 @@ def main():
             assert not api("POST", feed + "/poll", {"limit": 100})[1]["data"]
             print("PASS process restart preserves ambiguous holds, idempotent settlement and durable account-ordered ACK", flush=True)
 
-            key = setup("gateway-money", funded=True)
+            key = setup("gateway-money", funded=True, scopes=["chat.completions", "completions"])
             runtime_calls = []
 
             class Runtime(http.server.BaseHTTPRequestHandler):
@@ -240,11 +247,12 @@ def main():
             runtime = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Runtime)
             threading.Thread(target=runtime.serve_forever, daemon=True).start()
             gateway_ports = []
+            gateway_processes = []
             for i in range(2):
                 gateway_port = port()
                 gateway_ports.append(gateway_port)
                 env = dict(os.environ, XSCOPE_GATEWAY_ADDRESS=f"127.0.0.1:{gateway_port}", XSCOPE_METRICS_ADDRESS=f"127.0.0.1:{port()}",
-                    XSCOPE_USAGE_WAL=str(root / f"gateway-{i}.jsonl"), XSCOPE_REDIS_URL="",
+                    XSCOPE_USAGE_MODE="memory", XSCOPE_REDIS_URL="", XSCOPE_GATEWAY_GRACE_SECONDS="1",
                     XSCOPE_CONTROL_INTERNAL_URL=f"http://127.0.0.1:{configs[i][1]}/internal/v1", XSCOPE_INTERNAL_TOKEN=token,
                     XSCOPE_BILLING_RESERVATIONS="true", XSCOPE_MODEL_CONTEXT_TOKENS="700", XSCOPE_ADDITIONAL_SERVING_JSON="[]",
                     XSCOPE_SERVING_ENTRY_JSON=json.dumps({"id": "demo-pool", "model": "xscope-demo", "revision": "development", "address": f"127.0.0.1:{runtime.server_port}"}),
@@ -252,6 +260,7 @@ def main():
                 log = (root / f"gateway-{i}.log").open("wb")
                 logs.append(log)
                 processes.append(subprocess.Popen([runfiles.Create().Rlocation(sys.argv[2])], env=env, stdout=log, stderr=log))
+                gateway_processes.append(processes[-1])
 
                 def gateway_ready():
                     try:
@@ -261,10 +270,10 @@ def main():
                         return False
                 eventually(gateway_ready)
 
-            def infer(index):
+            def infer(index, route="/v1/chat/completions", prompt=None):
                 connection = http.client.HTTPConnection("127.0.0.1", gateway_ports[index % 2], timeout=25)
                 try:
-                    connection.request("POST", "/v1/chat/completions", json.dumps({"model": "xscope-demo", "messages": [], "max_tokens": 4}),
+                    connection.request("POST", route, json.dumps({"model": "xscope-demo", **({"messages": []} if prompt is None else {"prompt": prompt}), "max_tokens": 4}),
                         {"Authorization": "Bearer " + key["secret"], "Content-Type": "application/json", "X-Request-Id": "duplicate-client-correlation"})
                     response = connection.getresponse()
                     result = response.status, response.getheader("x-xscope-billing-request-id"), response.read()
@@ -288,6 +297,25 @@ def main():
             assert len(runtime_calls) == 2
             assert sql("SELECT count(DISTINCT t.id),count(e.id),sum(e.amount_microunits) FROM xscope.ledger_transactions t JOIN xscope.ledger_entries e ON e.transaction_id=t.id WHERE t.idempotency_key IN ('reservation:" + first_id + "','reservation:" + second[1] + "')") == "2|4|0"
             print("PASS two actual Gateways / two control planes: 8 concurrent requests -> 1 Runtime call + 7 HTTP 402; repeated client ID creates distinct balanced settlements", flush=True)
+            completion = infer(0, "/v1/completions", "synthetic text")
+            assert completion[0] == 200, completion[0]
+            eventually(lambda: api("GET", path(completion[1], "gateway-money"))[1]["state"] == "settled")
+            assert runtime_calls[-1]["prompt"] == "synthetic text" and "messages" not in runtime_calls[-1]
+            assert runtime_calls[-1]["max_tokens"] == 4
+            before_calls = len(runtime_calls)
+            assert infer(1, "/v1/completions", ["a", "b"])[0] == 400
+            assert len(runtime_calls) == before_calls
+            print("PASS text completions: scoped Gateway route, original prompt forwarded, enforced output bound and same balanced settlement; batch prompts denied before Runtime", flush=True)
+            # The following tests deliberately compare global projection rows.
+            # Quiesce unrelated snapshot cold-backfills rather than racing them
+            # with assertions that a specific idempotent write changed nothing.
+            for gateway_process in gateway_processes:
+                gateway_process.terminate()
+            for gateway_process in gateway_processes:
+                gateway_process.wait(timeout=20)
+            verify_workers(api, sql, setup, request)
+            verify_clusters(api, sql)
+            verify_cluster_pull(api, runfiles.Create().Rlocation(sys.argv[3]), root, configs[0][1], port, eventually)
             verify_cursors(api, sql, container, setup, request)
             verify_projections(api, sql, container, setup, request)
             setup("console-pending")
@@ -299,17 +327,23 @@ def main():
             public, private = port(), port()
             console_env = dict(configs[0][2], XSCOPE_CONTROL_ADDRESS=f"127.0.0.1:{public}",
                 XSCOPE_CONTROL_INTERNAL_ADDRESS=f"127.0.0.1:{private}", XSCOPE_METRICS_ADDRESS=f"127.0.0.1:{port()}",
-                XSCOPE_CONSOLE_AUTH="trusted-headers", XSCOPE_AUTO_JOIN_DEFAULT_TENANT="false", XSCOPE_BOOTSTRAP_ADMIN_USERS="console-smoke-owner")
+                XSCOPE_CONSOLE_AUTH="trusted-headers", XSCOPE_AUTO_JOIN_DEFAULT_TENANT="false", XSCOPE_BOOTSTRAP_ADMIN_USERS="console-smoke-owner",
+                XSCOPE_PLATFORM_ADMIN_SUBJECTS="console-smoke-owner",
+                XSCOPE_BILLING_REVIEWER_SUBJECTS="console-smoke-owner,finance-reviewer,finance-reviewer-2")
             configs.append((public, private, console_env))
             launch(len(configs) - 1)
-            def console_get(path, user=None):
+            def console_call(method, path, payload=None, user=None):
                 headers = {} if user is None else {"X-Auth-Request-User": user, "X-Auth-Request-Preferred-Username": user, "X-Auth-Request-Sub": user}
-                req = urllib.request.Request(f"http://127.0.0.1:{public}/admin/v1" + path, headers=headers)
+                headers["Content-Type"] = "application/json"
+                req = urllib.request.Request(f"http://127.0.0.1:{public}/admin/v1" + path, headers=headers, method=method,
+                    data=None if payload is None else json.dumps(payload).encode())
                 try:
                     with urllib.request.urlopen(req, timeout=10) as response:
                         return response.status, json.load(response)
                 except urllib.error.HTTPError as error:
                     return error.code, json.load(error)
+            def console_get(path, user=None):
+                return console_call("GET", path, user=user)
             position_path = "/billing/accounts/funded/position"
             pending_path = "/billing/accounts/console-pending/pending-reservations"
             for endpoint in (position_path, pending_path):
@@ -328,6 +362,41 @@ def main():
             assert all("spec" not in row and "price" not in row and "completion" not in row and isinstance(row["reserved_microunits"], str) for row in pending["data"])
             assert console_get(pending_path + "?limit=101", "console-smoke-owner")[0] == 400
             print("PASS console positions and bounded pending discovery: anonymous/outsider denied, member financial read, owner-only evidence list, exact string money and redacted DTO", flush=True)
+            verify_worker_console(console_call, sql)
+            verify_cluster_console(console_call)
+            verify_catalog(api, sql, setup, request, console_call)
+            verify_managed_traffic(api, sql, root, configs, token, runfiles.Create().Rlocation(sys.argv[2]), runfiles.Create().Rlocation(sys.argv[3]), port, eventually, console_call)
+            verify_reviews(console_call, api, sql, setup, request)
+            review_path = "/billing/accounts/review-money/reviews/case-a"
+            persisted_review = console_get(review_path, "finance-reviewer")[1]
+            processes[-1].kill()
+            processes[-1].wait(timeout=5)
+            launch(len(configs) - 1)
+            assert console_get(review_path, "finance-reviewer")[1] == persisted_review
+            assert console_call("POST", review_path + "/decision", persisted_review["decision"], "finance-reviewer")[0] == 200
+            print("PASS review evidence/audit survive process restart; committed decision replay does not charge again", flush=True)
+            for table in ("operation_audits", "billing_effects", "cluster_revisions", "model_prices", "route_revisions"):
+                result = subprocess.run(["docker", "exec", container, "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-c", "DELETE FROM xscope." + table], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                assert result.returncode != 0
+            assert console_get("/audit", "console-smoke-member")[0] == 403
+            assert console_get("/audit?limit=101", "console-smoke-owner")[0] == 400
+            assert len(console_get("/audit?limit=2", "console-smoke-owner")[1]["data"]) == 2
+            assert sql("SELECT count(*)>0 FROM xscope.operation_audits WHERE action='console.intent'") == "t"
+            print("PASS append-only audit/effects/revisions, bounded admin-only audit API and durable console mutation intents", flush=True)
+            processes[-1].kill()
+            processes[-1].wait(timeout=5)
+            console_env["XSCOPE_EVENT_WORKER_ENABLED"] = "true"
+            launch(len(configs) - 1)
+            eventually(lambda: sql("SELECT state FROM xscope.billing_jobs WHERE billing_account_id='account-worker-test'") == "idle")
+            metrics_url = "http://" + console_env["XSCOPE_METRICS_ADDRESS"] + "/metrics"
+            with urllib.request.urlopen(metrics_url, timeout=3) as response:
+                metrics = response.read().decode()
+            assert 'xscope_event_worker_state{kind="jobs",state="pending"}' in metrics
+            assert 'xscope_billing_pending_oldest_seconds{state="dispatched"}' in metrics
+            assert 'xscope_billing_pending_oldest_seconds{state="reserved"}' in metrics
+            assert sql("SELECT state,settled_microunits IS NULL FROM xscope.billing_reservations WHERE id='worker-held'") == "dispatched|t"
+            print("PASS actual background consumer drains jobs and exports bounded backlog metrics; existing uncertain hold remains frozen", flush=True)
+            verify_payments(api, sql, setup, root, runfiles.Create().Rlocation(sys.argv[4]), configs, launch, port)
             success = True
         finally:
             release_runtime.set()

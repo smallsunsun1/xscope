@@ -7,7 +7,7 @@ if [[ "$(kubectl config current-context)" != "docker-desktop" ]]; then
   echo "Local reset is restricted to the docker-desktop context." >&2
   exit 1
 fi
-kubectl -n xscope-system get statefulset/postgres pvc/gateway-usage-wal deployment/redis >/dev/null
+kubectl -n xscope-system get statefulset/postgres deployment/redis >/dev/null
 kubectl -n xscope-system scale deployment/control-plane deployment/gateway --replicas=0
 kubectl -n xscope-system wait --for=delete pod -l app.kubernetes.io/name=control-plane --timeout=120s
 kubectl -n xscope-system wait --for=delete pod -l app.kubernetes.io/name=gateway --timeout=120s
@@ -18,5 +18,4 @@ kubectl -n xscope-system exec deployment/redis -- sh -ec '
     redis-cli UNLINK "$key" >/dev/null
   done
 '
-kubectl -n xscope-system delete pvc gateway-usage-wal --wait=true --timeout=120s
-echo "Removed XScope business schema, development quota state and usage WAL; Keycloak identities remain."
+echo "Removed XScope business schema and development quota state; Keycloak identities and historical evidence PVCs remain."

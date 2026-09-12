@@ -1,0 +1,29 @@
+title = "XScope public repository safety"
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Exact public KEDA image digest, not a credential"
+regexTarget = "secret"
+regexes = ['''^ba32172082a2ff935d5b62ffa0bd0698424d373b55c5cae0846db057e237b28e$''']
+
+[[rules]]
+id = "aliyun-access-key-id"
+description = "Alibaba Cloud credential identifier"
+regex = '''\bLTAI[0-9A-Za-z]{16,30}\b'''
+
+[[rules]]
+id = "private-oss-access-point"
+description = "Account-bound OSS access-point endpoint must not be committed"
+regex = '''(?i)[a-z0-9-]+-[0-9]{12,20}\.oss-[a-z0-9-]+\.oss-accesspoint\.aliyuncs\.com'''
+
+[[rules]]
+id = "private-oss-alias"
+description = "Real-looking OSS access-point alias"
+regex = '''(?i)[a-z0-9-]+-[a-f0-9]{24,64}-ossalias'''
+
+[[rules]]
+id = "embedded-database-password"
+description = "Database URLs with literal credentials"
+regex = '''(?i)(?:postgres(?:ql)?|redis)://[^\s:/"']+:([^\s@"'{}$]{8,})@'''
+secretGroup = 1

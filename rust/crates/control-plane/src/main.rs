@@ -1,10 +1,23 @@
 mod api;
+mod audit;
 mod billing;
 mod billing_feed;
 mod billing_projection;
+mod billing_review;
+mod catalog;
+mod clusters;
 mod config;
 mod error;
+mod event_worker;
+mod managed_pools;
+mod payment_service;
+mod refund_service;
+mod releases;
 mod repository;
+mod tax;
+mod traffic;
+mod scaling;
+mod gateway_proofs;
 
 use std::process::ExitCode;
 
@@ -52,6 +65,10 @@ async fn run() -> Result<()> {
         .await
         .context("apply control-plane database migrations")?;
     let repository = Repository::new(database);
+    repository
+        .bootstrap_catalog()
+        .await
+        .context("bootstrap model catalog")?;
     bootstrap(&repository, &config.bootstrap_api_keys_json)
         .await
         .context("bootstrap local API keys")?;
@@ -72,6 +89,19 @@ async fn run() -> Result<()> {
     tracing::info!(address = %public_address, "control plane public API listening");
     tracing::info!(address = %internal_address, "control plane internal API listening");
     let internal_state = state.clone();
+    let (worker_stop, worker_shutdown) = tokio::sync::watch::channel(false);
+    let pending_monitor = tokio::spawn(billing::monitor_pending(
+        state.repository.clone(),
+        worker_shutdown.clone(),
+    ));
+    let worker = if std::env::var("XSCOPE_EVENT_WORKER_ENABLED").as_deref() == Ok("true") {
+        Some(tokio::spawn(event_worker::run(
+            state.repository.clone(),
+            worker_shutdown,
+        )))
+    } else {
+        None
+    };
     let internal = tokio::spawn(async move {
         axum::serve(internal_listener, internal_router(internal_state)).await
     });
@@ -80,6 +110,11 @@ async fn run() -> Result<()> {
         .await
         .context("serve public control-plane API")?;
     internal.abort();
+    let _ = worker_stop.send(true);
+    let _ = pending_monitor.await;
+    if let Some(worker) = worker {
+        let _ = worker.await;
+    }
     Ok(())
 }
 

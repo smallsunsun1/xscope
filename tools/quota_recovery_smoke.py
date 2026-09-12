@@ -3,6 +3,7 @@
 No changes to Kubernetes or its Redis. Docker fixture is CPU/memory bounded.
 """
 import http.client
+import http.server
 import json
 import os
 from pathlib import Path
@@ -70,6 +71,7 @@ def main():
     processes, logs = [], []
     container = None
     proxy = None
+    collector = None
     with tempfile.TemporaryDirectory(prefix="xscope-quota-") as directory:
         root = Path(directory)
         try:
@@ -127,6 +129,29 @@ def main():
                 except OSError:
                     return False
 
+            receipts = {}
+            receipts_lock = threading.Lock()
+
+            class UsageHandler(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_error(503)  # This test deliberately uses static keys.
+
+                def do_POST(self):
+                    if self.path != "/usage-events" or self.headers.get("Authorization") != "Bearer synthetic-internal":
+                        self.send_error(403)
+                        return
+                    event = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                    with receipts_lock:
+                        receipts.setdefault(event["event_id"], event)
+                    self.send_response(204)
+                    self.end_headers()
+
+                def log_message(self, *args):
+                    pass
+
+            collector = http.server.ThreadingHTTPServer(("127.0.0.1", 0), UsageHandler)
+            threading.Thread(target=collector.serve_forever, daemon=True).start()
+
             runtime_port = port()
             spawn(runtime, {"XSCOPE_RUNTIME_HOST": "127.0.0.1", "XSCOPE_RUNTIME_PORT": str(runtime_port), "XSCOPE_RUNTIME_STREAM_DELAY_SECONDS": "0"}, "runtime")
             eventually(lambda: ready(runtime_port))
@@ -134,7 +159,8 @@ def main():
             for index in range(2):
                 listen = port()
                 spawn(gateway, {"XSCOPE_GATEWAY_ADDRESS": f"127.0.0.1:{listen}", "XSCOPE_METRICS_ADDRESS": f"127.0.0.1:{port()}",
-                    "XSCOPE_USAGE_WAL": str(root / f"gateway-{index}.jsonl"), "XSCOPE_CONTROL_INTERNAL_URL": "", "XSCOPE_INTERNAL_TOKEN": "",
+                    "XSCOPE_USAGE_MODE": "memory", "XSCOPE_BILLING_RESERVATIONS": "false",
+                    "XSCOPE_CONTROL_INTERNAL_URL": f"http://127.0.0.1:{collector.server_port}", "XSCOPE_INTERNAL_TOKEN": "synthetic-internal",
                     "XSCOPE_REDIS_URL": f"redis://127.0.0.1:{proxy.server_address[1]}/", "XSCOPE_ADDITIONAL_SERVING_JSON": "[]",
                     "XSCOPE_SERVING_ENTRY_JSON": json.dumps({"id": "smoke-pool", "model": "xscope-demo", "revision": "v1", "address": f"127.0.0.1:{runtime_port}"}),
                     "XSCOPE_API_KEYS_JSON": json.dumps([{"id": "smoke-key", "project_id": "smoke", "tenant_id": "smoke", "secret": "smoke-secret"}])}, f"gateway-{index}")
@@ -180,6 +206,12 @@ def main():
             command("CLIENT", "KILL", "TYPE", "normal", "SKIPME", "yes")
             actual += infer(gateway_ports[0])
             eventually(lambda: totals() == (3, actual))
+            def delivered():
+                with receipts_lock:
+                    return len(receipts) == 3 and sum(e["input_tokens"] + e["output_tokens"] for e in receipts.values()) == actual
+
+            eventually(delivered)
+            print("PASS HTTP usage receipts match exact provider totals across both gateways", flush=True)
             print("PASS two gateways share exact counters; first request after stale connection returns 200", flush=True)
         finally:
             for process in processes:
@@ -191,6 +223,9 @@ def main():
             if proxy:
                 proxy.shutdown()
                 proxy.server_close()
+            if collector:
+                collector.shutdown()
+                collector.server_close()
             if container:
                 subprocess.run(["docker", "rm", "-f", container], check=True, stdout=subprocess.DEVNULL)
             print("Removed only disposable quota-test container and local processes; cluster Redis/data unchanged.", flush=True)

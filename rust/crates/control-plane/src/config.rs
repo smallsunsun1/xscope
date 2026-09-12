@@ -18,6 +18,8 @@ pub struct Config {
     pub default_tenant_id: String,
     pub auto_join_default_tenant: bool,
     pub bootstrap_admin_users: BTreeSet<String>,
+    pub platform_admin_subjects: BTreeSet<String>,
+    pub billing_reviewer_subjects: BTreeSet<String>,
     pub bootstrap_api_keys_json: String,
     pub component_targets: Vec<(String, String)>,
     pub route_pools: Vec<xscope_domain::RoutePool>,
@@ -61,6 +63,18 @@ impl Config {
             default_tenant_id: env_or("XSCOPE_DEFAULT_TENANT_ID", "tenant-local"),
             auto_join_default_tenant: env_or("XSCOPE_AUTO_JOIN_DEFAULT_TENANT", "false") == "true",
             bootstrap_admin_users,
+            platform_admin_subjects: env_or("XSCOPE_PLATFORM_ADMIN_SUBJECTS", "")
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            billing_reviewer_subjects: env_or("XSCOPE_BILLING_REVIEWER_SUBJECTS", "")
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_owned)
+                .collect(),
             bootstrap_api_keys_json: env::var("XSCOPE_BOOTSTRAP_API_KEYS_JSON").unwrap_or_default(),
             component_targets: vec![
                 (

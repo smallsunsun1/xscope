@@ -19,7 +19,7 @@
                  └──────┬───────┘                        └───┬──────┬───┘
                         │ desired state                       │      │ usage
               PostgreSQL│                                    │      ▼
-                        ▼                                    │  Kafka/Redpanda
+                        ▼                                    │  HTTP to Control Plane
                  ┌──────────────┐                             │      │
                  │ Rust Cluster   │                             │      ▼
                  │ Agent        │                             │ meter/ledger
@@ -44,7 +44,7 @@
 - **Edge/API Gateway**：TLS、OpenAI/DashScope 兼容协议、API Key/JWT、请求大小限制、SSE/WebSocket、错误规范化。
 - **Quota & admission**：本地 token bucket + Redis 全局额度；请求前预占、结束后按真实 token 结算。
 - **Traffic director**：按 tenant/model/region/版本筛选 endpoint，再结合 readiness、容量、延迟、成本、灰度权重选择；失败仅对幂等且未开始流式输出的请求重试。
-- **Usage emitter**：生成全局唯一 `event_id`，记录输入/输出 token、缓存命中、模型版本、租户、价格快照版本。事件投递失败进入本地 WAL/降级队列，不能静默丢失。
+- **Usage emitter**：生成全局唯一 `event_id`，记录输入/输出 token、缓存命中、模型版本、租户、价格快照版本。通过有界内存队列 HTTP 上报控制面；短时故障幂等重试，进程丢失可能丢用量，中央预占保留并进入证据核查/损失豁免流程。没有本地 WAL 或消息中间件部署。
 
 ### 控制面
 
@@ -70,7 +70,7 @@
 | --- | --- | --- |
 | 租户、项目、Key 元数据、价格、账本 | PostgreSQL | 强一致事务 |
 | 限流计数、短期配额预占、配置缓存 | Redis Cluster | 原子脚本 + TTL |
-| usage/audit/deployment 事件 | Kafka/Redpanda | 至少一次 + 消费端去重 |
+| 已提交的 usage/audit/deployment 事件 | PostgreSQL + 事务 Outbox | 事务提交、租约消费与幂等 ACK；Gateway 未确认上报可丢失 |
 | 模型制品、账单归档、请求日志采样 | S3 兼容对象存储 | 不可变/版本化 |
 | 指标、日志、链路 | Prometheus + Loki/ClickHouse + OTel | 最终一致 |
 
@@ -103,7 +103,7 @@
 ## 8. 交付阶段
 
 - **M0（已完成）**：按语言组织的原生工作区、契约、健康检查、CRD。
-- **M1（已完成初版）**：PostgreSQL 项目/API Key → 动态策略快照 → Pingora 细粒度鉴权 → FastAPI backend → 持久化 usage WAL → 幂等用量表/费用汇总。
+- **M1（已完成初版）**：PostgreSQL 项目/API Key → 动态策略快照 → Pingora 细粒度鉴权 → FastAPI backend → HTTP 用量上报与中央事务 → 幂等用量表/费用汇总。
 - **M2（已完成初版）**：Operator/cluster-agent、Ant Design 控制台、Redis 全局 RPM/TPM、预付余额、订单/支付退款、双分录、发票记录与对账。
 - **M3**：多集群签名期望状态、header 灰度路由、llm-d/KServe KV-aware 调度、自动扩缩、正式支付/税务发票、审计与 SLO。
 - **M4**：企业 SSO、数据驻留、batch/fine-tune、市场化模型接入与成本优化。

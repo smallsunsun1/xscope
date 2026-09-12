@@ -1,6 +1,8 @@
 # 资金预占协议与事务 Outbox
 
-第 5 阶段由 Rust/Axum + SeaORM 控制面、Pingora Gateway 和 PostgreSQL 实现，不增加常驻服务。Gateway 已实现资金预占准入、派发标记、结算 WAL 与崩溃恢复；K8s Gateway 配置启用 `XSCOPE_BILLING_RESERVATIONS=true`。独立开发进程默认关闭，必须配置控制面内部 URL/token 才能开启。Redis RPM/TPM 仍是独立的流量配额，不等于资金预占。
+Gateway 仅使用 [HTTP + 有界内存队列](usage-delivery.md)，中央金额仍由 SeaORM/PostgreSQL 事务保护。未决请求可凭真实证据结算，或经两名财务审核员明确批准后转 `waived`；没有超时自动释放或本地日志回放。
+
+第 5 阶段由 Rust/Axum + SeaORM 控制面、Pingora Gateway 和 PostgreSQL 实现，不增加常驻服务。Gateway 已实现资金预占准入、派发标记、HTTP 幂等结算与未决发现；K8s Gateway 配置启用 `XSCOPE_BILLING_RESERVATIONS=true`。独立开发进程默认关闭，无论是否开启资金准入，都必须配置控制面内部 URL/token 用于上报。Redis RPM/TPM 仍是独立的流量配额，不等于资金预占。
 
 ## 金额和状态
 
@@ -27,15 +29,14 @@ dispatched ── 用量未知 / 超过预占上限 ──> 保持冻结，等�
 
 ## Gateway 准入、恢复和边界
 
-- 服务端为每次推理生成独立 `req-UUID`，同时作为 reservation ID 和财务 request_id。响应头 `x-xscope-billing-request-id` 可查账；客户端 `X-Request-Id` 仍用于 Envoy/Runtime 日志关联，不能当作免费重试或扣款去重授权。WAL 和原 trace 关联两种 ID。
-- 单个有界工作线程先把完整 reserve 请求写入 `events.jsonl.reservations.jsonl` 并 fsync，再 reserve、dispatch、持久化 checkpoint，最后允许转发 prompt。不保存 API Key 明文。排队/网络超时返回 503；明确余额不足返回 402，不触发 Runtime 推理。
-- 重启、超时或丢回复后的未确认 intent 只重放账务查询/幂等 reserve。若仍为 reserved，释放确定未派发的预占；若已 dispatched，则保留。恢复过程从不 dispatch 或重发推理。恢复期间 readiness 失败，完成后才能准入新请求。
-- 金额使用保守 token 上限：输出默认 1024，必须大于 0 且小于模型上下文；输入预占 `context - output_limit`，不把通用 tokenizer 估计当作财务上界。实际结算只收取已知用量。当前配置上下文为 32768，需与模型目录/Runtime 配置一致；此方式可能冻结明显高于短请求实际费用的金额，后续可引入可信 tokenizer 服务收紧上限。
-- Gateway 将输出上限规范化并传给 Runtime，拒绝同时指定两个 max 字段、超长预估输入和 `n != 1`。当前仅支持单结果 chat；扩展多结果/其他推理 API 前需要新的计费边界，不能直接放开。
-- 完成后写同一持久卷上的 v2 usage WAL。已知用量走冻结价格 settle；提交后丢 ACK 使用同一 payload 重试。旧 v1 WAL 继续走原 usage-events 接口，不改写或丢弃历史记录。共享 Rust domain DTO 避免两端契约漂移。
-- 用量未知或超过预占上限的 v2 记录不作零结算：确认 PostgreSQL 中仍有 dispatched 记录后推进投递 checkpoint，保留原 WAL 证据和数据库冻结，不阻塞后续正常结算。此 ACK 仅表示待对账状态已持久化，**不表示已结算**。日志/`billing_pending` 指标提示人工处理；尚无待对账审批接口或自动估价扣款。
-- 存储故障停止新准入。已 dispatch 但尚未写最终 WAL 就崩溃的请求仍有数据库冻结保护，但实际用量可能无法恢复，需供应商证据对账。没有按超时自动释放的定时器。
-- 本地继续使用单副本 Recreate + 原 PVC，新增一个低开销线程，不增加 Pod/CPU request。多 Gateway 共享资金约束已用真实进程测试，但生产多副本仍需**每副本独立持久卷**；禁止两个副本共享 WAL。已补已 ACK 日志本地分段封存、共享在途空间预算和磁盘水位准入；尚无远程归档、压缩或自动清理。见 [WAL 存储边界](wal-storage.md)。
+- 每次推理生成独立 `req-UUID`，作为 reservation ID 和财务 request_id；响应头 `x-xscope-billing-request-id` 用于查账。客户端 X-Request-Id 只关联日志，不能当作免费重试或扣款去重授权。
+- 准入前预留内存上报槽位。单个有界资金 worker 同步 reserve → dispatch，确认后才释放 prompt body。明确余额不足返回 402，排队/网络不确定返回 503，不自动重发推理。
+- 失败或调用方取消后只尝试一次幂等账务恢复：reserved 可释放；dispatched 保持冻结。进程崩溃会丢失本地请求上下文，中央预占不会因此消失。
+- 金额使用保守 token 上限：输出默认 1024，输入预占 `context - output_limit`。当前上下文 32768，必须与 Runtime 一致。拒绝互斥 max 字段、超长估算输入及 `n != 1`；支持单结果 Chat/Text Completions。
+- 完成后产生一次不可变事件，后台立即 HTTP 上报。已知且在预占范围内走 settle，丢响应使用同一 payload 重试。关闭资金协议的开发实例走 v1 usage-events，不代表推理前已有资金保障。
+- 未知/超限用量走 unresolved，原始说明和中央事件同事务提交，冻结不变；ACK 不是已结算。缺失 token 使用 NULL，不伪造零。
+- 上报队列满、超龄、配置错误时新推理和 readiness 返回 503，已有请求继续处理；SIGTERM 限时排空。强杀/节点丢失不保证未确认事件送达，不承诺每条推理可恢复。
+- 多 Gateway 不共享本地文件，也不需要 usage PVC。共享约束由 PostgreSQL 账户锁与 Redis 配额实现，实例数量和生产容量仍需压测。完整配置、损失豁免及迁移步骤见 [投递契约](usage-delivery.md)。
 
 ## 内部接口
 
@@ -49,6 +50,7 @@ dispatched ── 用量未知 / 超过预占上限 ──> 保持冻结，等�
 | `POST /projects/{project}/reservations/{id}/dispatch` | 标记可能已经派发；无业务请求体 |
 | `POST /projects/{project}/reservations/{id}/release` | 释放确定未派发的预占 |
 | `POST /projects/{project}/reservations/{id}/settle` | 按冻结报价结算已知用量 |
+| `POST /projects/{project}/reservations/{id}/unresolved` | 幂等保存未知/超限说明，不释放冻结 |
 | `POST /projects/{project}/consumers/{consumer}/poll` | 拉取尚未 ACK 的事件，limit 1–100，可携带上一批 ACK |
 | `POST /projects/{project}/consumers/{consumer}/ack` | CAS 推进持久化消费位置 |
 
@@ -79,7 +81,7 @@ Release 请求为 `{"reason":"not_dispatched"}`。参数缺失/类型不正确�
 
 ## 持久化事件消费
 
-新增 `xscope.billing_reservations`、`xscope.billing_events`、`xscope.billing_consumers`。本批 Outbox 是可重放的 pull 接口，不是 Kafka/NATS 服务，也没有对外 webhook 发布器。
+新增 `xscope.billing_reservations`、`xscope.billing_events`、`xscope.billing_consumers`。Outbox 是数据库持久事件流；内置租约消费者按批领取、幂等处理、退避和监控，见 [消费者契约](backend-workflows.md)。它不是 Kafka/NATS，也没有对外 webhook 发布器。
 
 每个账户独立分配 sequence；同一账户从取号到 COMMIT 都持有账户锁。不会使用可能出现提交乱序的全局自增序号作为消费水位。事件包括 reservation.created/dispatched/released/settled 和 ledger.posted。历史账本不自动回填，ledger.posted 覆盖**全部旧控制面实例退出后，由新代码提交的交易**。
 
@@ -121,11 +123,10 @@ bazel test //...
 # 独立 PostgreSQL + 两个控制面 + 两个 Gateway，不触碰集群数据
 bazel run //tools:billing_protocol_smoke
 # 真 Gateway + 故障协议服务：丢 ACK / 强杀 / 未知与超限用量
-bazel test //tools:gateway_billing_test --nocache_test_results
+bazel test //tools:usage_memory_test --nocache_test_results
 
-# 控制面协议已部署后，仅构建并更新 Gateway，不混入其他服务改动
-./tools/bazel-linux.sh images gateway
-bazel run //tools:deploy_gateway_billing
+# 本地完整更新；旧版本首次切换先按 usage-delivery.md 完成检查
+./tools/deploy-local.sh
 # 校验真实推理预占 -> 派发 -> 结算及 ledger/outbox 同时落库
 bazel run //tools:billing_protocol_cluster_check
 bazel run //tools:inference_cluster_smoke
@@ -141,8 +142,8 @@ bazel run //tools:billing_protocol_cluster_check
 
 新增测试持有真实账户/消费者行锁，验证读侧隔离、相互不阻塞、未提交事件不可 ACK；验证并发首次注册、ACK CAS、合并拉取的重试、同时间戳的未决分页、鉴权与账户隔离。另建 1 万测试账户/10 万事件执行 1,000 次空轮询，检查所有探测游标的元组版本和时间戳不变。该探测不是生产吞吐认证，详见容量说明。
 
-控制面部署脚本 `deploy_billing_protocol` 现在先停止旧控制面写入者，再把 xscope 业务 schema 备份至权限受限的 `.build/billing-backup-*`，启动新控制面并验证新增表。增量汇总不能与旧非投影版本混跑，这不是普通无停机滚动更新。Gateway 部署脚本复制整棵 WAL 目录（包括分段/checkpoint/manifest/seal）至 `.build/gateway-billing-backup-*`，以 Recreate 更新单写者并校验已有数据前缀。Gateway 的运行中副本不是跨文件原子恢复点。两种切换均会短暂影响新推理准入，但不清空业务、Keycloak、Redis、WAL 或 PVC。
+完整本地部署先在控制面可用时排空 Gateway，再排除旧控制面写入者、将业务 schema 备份到仓库外的权限受限目录并更新。增量汇总不能与旧非投影版本混跑，这不是全栈零停机升级。旧 Gateway 首次迁移先执行只读证据检查；现有 PVC、对象存储证据和身份数据不删除。
 
 ## 下一步
 
-第 5 阶段继续保持未完成：待补未决请求的供应商证据/审批对账、WAL 远程归档与可证明安全的回收、每副本持久卷、生产事件消费者。当前 UI 没有冻结余额/预占管理页面；不提前宣称正式支付、税务发票或完整财务对账已接入。
+人工证据提交、独立财务审批、幂等补结算、损失豁免及事务审计已接入后端，见 [核查合同](billing-reviews.md)。供应商自动取证、生产规模/故障窗口压测和外部支付/税务联调仍需完成。历史本地 WAL 及归档代码已移除，不再作为后续实现目标；PostgreSQL 事件与财务证据仍需独立备份和保留策略。

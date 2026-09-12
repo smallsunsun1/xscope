@@ -1,0 +1,11 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+rust_library(
+    name = "payments", srcs = glob(["src/*.rs"], exclude = ["src/fixture.rs"]), crate_name = "xscope_payments", edition = crate_edition(), aliases = aliases(),
+    proc_macro_deps = all_crate_deps(proc_macro = True), deps = all_crate_deps(normal = True), visibility = ["//visibility:public"],
+)
+rust_test(name = "payments_test", crate = ":payments", deps = all_crate_deps(normal_dev = True))
+rust_binary(
+    name = "payment_fixture", srcs = ["src/fixture.rs"], crate_root = "src/fixture.rs", edition = crate_edition(), aliases = aliases(),
+    deps = all_crate_deps(normal = True), visibility = ["//tools:__pkg__"], testonly = True,
+)

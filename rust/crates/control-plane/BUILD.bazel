@@ -14,6 +14,7 @@ rust_binary(
         "//rust/crates/domain",
         "//rust/crates/entities",
         "//rust/crates/migration",
+        "//rust/crates/payments",
         "//rust/crates/telemetry",
     ] + all_crate_deps(normal = True),
 )

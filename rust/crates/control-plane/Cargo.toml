@@ -28,6 +28,7 @@ uuid.workspace = true
 xscope-domain = { path = "../domain" }
 xscope-entities = { path = "../entities" }
 xscope-migration = { path = "../migration" }
+xscope-payments = { path = "../payments" }
 xscope-telemetry = { path = "../telemetry" }
 
 [lints]

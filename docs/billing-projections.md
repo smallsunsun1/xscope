@@ -52,7 +52,7 @@ bazel run //tools:deploy_billing_protocol
 bazel run //tools:billing_protocol_cluster_check
 ```
 
-部署脚本校验 Docker Desktop / 本地镜像，停止全部现有 control-plane Pods，确认旧写入者退出，再将业务 schema 保存到权限受限的 `.build/billing-backup-*/xscope.sql`，然后启动新镜像和验证迁移。短暂停机期间新准入失败关闭，Gateway WAL 保留并重试上报。不停止数据库、身份服务或其他工作负载，不清空数据。若切换失败，先检查状态和新镜像，**不要自动恢复旧非投影写入者**；脚本可能保留 replicas=0 等待排障。
+部署脚本校验 Docker Desktop / 本地镜像，停止全部现有 control-plane Pods，确认旧写入者退出，再将业务 schema 保存到仓库外权限受限的私有备份目录，然后启动新镜像和验证迁移。完整部署先在控制面可用时排空 Gateway；短暂停机期间新准入失败关闭，不能在控制面停机后才指望内存队列完成上报。不停止数据库、身份服务或其他工作负载，不清空数据。若切换失败，先检查状态和新镜像，**不要自动恢复旧非投影写入者**；脚本可能保留 replicas=0 等待排障。
 
 普通 `tools/deploy-local.sh` 也接入此先停写/备份步骤，再用本地 manifests 恢复控制面。`--reset-business-data` 仍是原本的显式开发重置选项，本次没有使用。当前流程适用于本地短维护窗口，不是生产无停机迁移协议。
 
@@ -60,4 +60,4 @@ bazel run //tools:billing_protocol_cluster_check
 
 `bazel run //tools:billing_protocol_smoke` 使用独立 PostgreSQL 和两个控制面/Gateway，检查原始数据与所有已初始化汇总相等、账户并发回填、故障后汇总元组不变、重建事件失败回滚、重复/零/迟到用量、旧月份冻结预算、退款重试和金额溢出。锁住历史表验证热快照仍可完成，锁住账本验证预付费准入不再扫描余额历史。临时数据在结束后清理。
 
-历史增长不再增加已初始化预占路径的 SUM 成本，但账户资金锁仍串行；冷回填也不是常量时间。Gateway 单工作线程与 fsync、WAL 无界增长、全量 Key 快照大小、源数据保留/归档和生产消费调度仍需下一阶段处理，不能因此宣称已支持千亿 token/天。
+历史增长不再增加已初始化预占路径的 SUM 成本，但账户资金锁仍串行；冷回填也不是常量时间。Gateway 准入单工作线程和 HTTP RTT、有界队列积压、全量 Key 快照大小、源数据保留/归档和消费者吞吐仍需下一阶段处理，不能因此宣称已支持千亿 token/天。

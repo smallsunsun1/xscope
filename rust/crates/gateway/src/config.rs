@@ -9,7 +9,6 @@ pub struct Settings {
     pub region: String,
     pub model_revision: String,
     pub price_version: String,
-    pub usage_wal: String,
     pub api_keys: Vec<ApiKeyConfig>,
     pub serving: ServingConfig,
     pub additional_serving: Vec<ServingConfig>,
@@ -57,6 +56,10 @@ pub struct ServingConfig {
 
 #[derive(Debug, Error)]
 pub enum SettingsError {
+    #[error("WAL mode was removed; XSCOPE_USAGE_MODE may only be memory")]
+    InvalidUsageMode,
+    #[error("HTTP usage reporting requires XSCOPE_CONTROL_INTERNAL_URL and XSCOPE_INTERNAL_TOKEN")]
+    MissingUsageReporter,
     #[error(
         "billing reservations require an internal URL/token and a positive model context; XSCOPE_BILLING_RESERVATIONS must be true or false"
     )]
@@ -72,7 +75,7 @@ pub enum SettingsError {
     LegacyUpstreams,
     #[error("serving entry id, model and address must be nonempty")]
     InvalidServingEntry,
-    #[error("serving pool IDs must be unique and all pools must serve the configured public model")]
+    #[error("serving pool IDs must be unique and revisions must be nonempty")]
     InvalidServingPools,
 }
 
@@ -101,15 +104,20 @@ impl Settings {
         let mut ids = std::collections::HashSet::from([serving.id.clone()]);
         for pool in &additional_serving {
             pool.validate()?;
-            if pool.model != serving.model
-                || pool.revision.trim().is_empty()
-                || !ids.insert(pool.id.clone())
-            {
+            if pool.revision.trim().is_empty() || !ids.insert(pool.id.clone()) {
                 return Err(SettingsError::InvalidServingPools);
             }
         }
         let control_internal_url = env_or("XSCOPE_CONTROL_INTERNAL_URL", "");
         let internal_token = env_or("XSCOPE_INTERNAL_TOKEN", "");
+        let usage_mode = env_or("XSCOPE_USAGE_MODE", "memory");
+        // Refuse stale manifests instead of silently changing their durability contract.
+        if usage_mode != "memory" {
+            return Err(SettingsError::InvalidUsageMode);
+        }
+        if control_internal_url.is_empty() || internal_token.is_empty() {
+            return Err(SettingsError::MissingUsageReporter);
+        }
         let billing_reservations = env_or("XSCOPE_BILLING_RESERVATIONS", "false")
             .parse::<bool>()
             .map_err(|_| SettingsError::InvalidBilling)?;
@@ -127,7 +135,6 @@ impl Settings {
             region: env_or("XSCOPE_REGION", "local"),
             model_revision,
             price_version: env_or("XSCOPE_PRICE_VERSION", "2026-09-01"),
-            usage_wal: env_or("XSCOPE_USAGE_WAL", "/tmp/xscope-usage-v1.jsonl"),
             api_keys,
             serving,
             additional_serving,
@@ -158,9 +165,10 @@ fn env_or(name: &str, fallback: &str) -> String {
 
 impl ServingConfig {
     fn validate(&self) -> Result<(), SettingsError> {
-        if [&self.id, &self.model, &self.address]
-            .iter()
-            .any(|value| value.trim().is_empty())
+        if xscope_domain::traffic::managed(&self.id)
+            || [&self.id, &self.model, &self.address]
+                .iter()
+                .any(|value| value.trim().is_empty())
             || [&self.id, &self.revision]
                 .iter()
                 .any(|value| value.len() > 128 || http::HeaderValue::from_str(value).is_err())

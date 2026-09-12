@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+mod pull;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, Request, State},
@@ -282,18 +283,41 @@ async fn main() -> Result<()> {
             .context("create cluster-agent Kubernetes client")?,
         token: Arc::new(std::env::var("XSCOPE_INTERNAL_TOKEN").unwrap_or_default()),
     };
+    let pull_config = pull::Config::from_env()?;
+    let pull_enabled = pull_config.is_some();
+    let (pull_stop, pull_shutdown) = tokio::sync::watch::channel(false);
+    let pull_worker = pull_config
+        .map(|config| tokio::spawn(pull::run(app.client.clone(), config, pull_shutdown)));
     let address =
         std::env::var("XSCOPE_CLUSTER_AGENT_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8083".into());
     let listener = tokio::net::TcpListener::bind(&address)
         .await
         .with_context(|| format!("bind cluster-agent listener on {address}"))?;
     tracing::info!(%address,"cluster agent listening");
-    axum::serve(listener, router(app))
+    let app_router = if pull_enabled {
+        // No second control-plane writer in outbound mode.
+        Router::new()
+            .route(
+                "/healthz",
+                get(|| async { Json(json!({"status":"ok","mode":"outbound"})) }),
+            )
+            .route(
+                "/readyz",
+                get(|| async { Json(json!({"status":"ready","mode":"outbound"})) }),
+            )
+    } else {
+        router(app)
+    };
+    axum::serve(listener, app_router)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await
         .context("serve cluster-agent HTTP API")?;
+    let _ = pull_stop.send(true);
+    if let Some(worker) = pull_worker {
+        let _ = worker.await;
+    }
     Ok(())
 }
 

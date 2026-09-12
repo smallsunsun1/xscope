@@ -32,7 +32,8 @@ def main():
     args = parser.parse_args()
     if kubectl("config", "current-context").strip() != "docker-desktop":
         raise SystemExit("This smoke is scoped to docker-desktop; current context was not changed.")
-    key = os.environ.get("XSCOPE_TEST_API_KEY", "xscope-local-secret")
+    from observability_cluster import inference_api_key
+    key = inference_api_key()
     run_id = "pool-smoke-" + uuid.uuid4().hex
     namespace = "xscope-system"
 

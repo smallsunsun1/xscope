@@ -1,0 +1,39 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: modelscales.platform.xscope.io
+spec:
+  group: platform.xscope.io
+  scope: Namespaced
+  names: {plural: modelscales, singular: modelscale, kind: ModelScale}
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+        scale:
+          specReplicasPath: .spec.replicas
+          statusReplicasPath: .status.replicas
+          labelSelectorPath: .status.selector
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [modelUid, replicas]
+              properties:
+                modelUid:
+                  type: string
+                  minLength: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: Model identity is immutable.
+                replicas: {type: integer, minimum: 1, maximum: 10000}
+            status:
+              type: object
+              properties:
+                replicas: {type: integer}
+                selector: {type: string}

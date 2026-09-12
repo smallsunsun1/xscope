@@ -12,10 +12,10 @@ use uuid::Uuid;
 use xscope_domain::{
     ApiKey, ApiKeyRequest, BillingAccount, BillingOrder, BillingSummary, CapturePaymentRequest,
     CreateInvoiceRequest, CreateOrderRequest, CreateRefundRequest, GatewayKey, GatewaySnapshot,
-    Invoice, IssuedApiKey, KeyStatus, LedgerEntry, LedgerTransaction, MICROS_PER_MINOR_UNIT, Model,
-    Money, Payment, PlatformUser, Project, ProjectBilling, Quote, ReconcileRequest,
-    ReconciliationReport, Refund, TenantMembership, UsageEvent, ceil_minor_units, key_status,
-    usage_cost_microunits, validate_money,
+    Invoice, IssuedApiKey, KeyStatus, LedgerEntry, LedgerTransaction, MICROS_PER_MINOR_UNIT, Money,
+    Payment, PlatformUser, Project, ProjectBilling, Quote, ReconcileRequest, ReconciliationReport,
+    Refund, TenantMembership, UsageEvent, ceil_minor_units, key_status, usage_cost_microunits,
+    validate_money,
 };
 use xscope_entities::{
     api_key, billing_account, billing_order, invoice, ledger_entry, ledger_transaction, payment,
@@ -27,21 +27,12 @@ use crate::error::{ServiceError, ServiceResult};
 #[derive(Clone)]
 pub struct Repository {
     pub(crate) db: DatabaseConnection,
-    pub(crate) model: Model,
 }
 
 impl Repository {
     #[must_use]
     pub fn new(db: DatabaseConnection) -> Self {
-        Self {
-            db,
-            model: Model::default(),
-        }
-    }
-
-    #[must_use]
-    pub fn models(&self) -> Vec<Model> {
-        vec![self.model.clone()]
+        Self { db }
     }
 
     pub async fn ping(&self) -> ServiceResult<()> {
@@ -119,12 +110,8 @@ impl Repository {
         let request = request.with_defaults();
         let now = Utc::now();
         request.validate(now)?;
-        if request
-            .allowed_models
-            .iter()
-            .any(|model| model != &self.model.id)
-        {
-            return Err(ServiceError::Invalid("allowed model not found".to_owned()));
+        for model in &request.allowed_models {
+            self.model(model).await?;
         }
         let project = project::Entity::find_by_id(&request.project_id)
             .one(&self.db)
@@ -234,14 +221,12 @@ impl Repository {
         Ok(())
     }
 
-    pub fn quote(&self, model_id: &str, input: i64, output: i64) -> ServiceResult<Quote> {
-        if model_id != self.model.id {
-            return Err(ServiceError::Invalid("model not found".to_owned()));
-        }
-        let microunits = usage_cost_microunits(&self.model, input, output)?;
+    pub async fn quote(&self, model_id: &str, input: i64, output: i64) -> ServiceResult<Quote> {
+        let model = self.model(model_id).await?;
+        let microunits = usage_cost_microunits(&model, input, output)?;
         Ok(Quote {
-            model_id: self.model.id.clone(),
-            price_version: self.model.price_version.clone(),
+            model_id: model.id,
+            price_version: model.price_version,
             maximum: Money::cny(ceil_minor_units(microunits)),
         })
     }
@@ -336,6 +321,8 @@ impl Repository {
             generated_at: now,
             keys,
             route_policies: self.list_route_policies().await?,
+            catalog: self.catalog_snapshot().await?,
+            traffic: None,
         })
     }
 
@@ -382,6 +369,8 @@ impl Repository {
         model: &str,
         request: xscope_domain::PutRoutePolicy,
         pools: &[xscope_domain::RoutePool],
+        actor: &str,
+        operation: &str,
     ) -> ServiceResult<xscope_domain::RoutePolicy> {
         use sea_orm::sea_query::Expr;
         use xscope_entities::route_policy::{ActiveModel, Column, Entity};
@@ -389,7 +378,9 @@ impl Repository {
             .spec
             .validate_pools(model, pools)
             .map_err(ServiceError::Invalid)?;
-        if model != self.model.id || !(0..i64::MAX).contains(&request.expected_revision) {
+        let transaction = self.db.begin().await?;
+        crate::catalog::active_model(&transaction, model).await?;
+        if !(0..i64::MAX).contains(&request.expected_revision) {
             return Err(ServiceError::Invalid(
                 "unknown model or invalid expected_revision".into(),
             ));
@@ -403,22 +394,22 @@ impl Repository {
                 project_id: Set(project.id.clone()),
                 model: Set(model.to_owned()),
                 revision: Set(revision),
-                spec: Set(spec),
+                spec: Set(spec.clone()),
                 updated_at: Set(now),
             }
-            .insert(&self.db)
+            .insert(&transaction)
             .await
             .map_err(conflict_or_database)?;
         } else {
             // Atomic compare-and-swap; rollback also advances revision.
             let result = Entity::update_many()
                 .col_expr(Column::Revision, Expr::value(revision))
-                .col_expr(Column::Spec, Expr::value(spec))
+                .col_expr(Column::Spec, Expr::value(spec.clone()))
                 .col_expr(Column::UpdatedAt, Expr::value(now))
                 .filter(Column::ProjectId.eq(&project.id))
                 .filter(Column::Model.eq(model))
                 .filter(Column::Revision.eq(request.expected_revision))
-                .exec(&self.db)
+                .exec(&transaction)
                 .await?;
             if result.rows_affected != 1 {
                 return Err(ServiceError::Conflict(
@@ -426,6 +417,18 @@ impl Repository {
                 ));
             }
         }
+        xscope_entities::route_revision::ActiveModel {
+            project_id: Set(project.id.clone()),
+            model: Set(model.to_owned()),
+            revision: Set(revision),
+            spec: Set(spec),
+            actor: Set(actor.to_owned()),
+            operation: Set(operation.to_owned()),
+            created_at: Set(now),
+        }
+        .insert(&transaction)
+        .await?;
+        transaction.commit().await?;
         Ok(xscope_domain::RoutePolicy {
             tenant_id: project.tenant_id.clone(),
             project_id: project.id.clone(),
@@ -447,15 +450,11 @@ impl Repository {
             ));
         }
         let chargeable = is_chargeable_usage(&event);
-        if chargeable
-            && (event.model_id != self.model.id || event.price_version != self.model.price_version)
-        {
-            return Err(ServiceError::Invalid(
-                "usage event price version is not current".to_owned(),
-            ));
-        }
         let cost_microunits = if chargeable {
-            usage_cost_microunits(&self.model, event.input_tokens, event.output_tokens)?
+            let model = self
+                .historical_price(&event.model_id, &event.price_version)
+                .await?;
+            usage_cost_microunits(&model, event.input_tokens, event.output_tokens)?
         } else {
             0
         };
@@ -788,6 +787,9 @@ impl Repository {
             .one(&transaction)
             .await?
             .ok_or(ServiceError::NotFound)?;
+        if payment.provider == "alipay" {
+            return Err(ServiceError::Invalid("Alipay refunds require the provider refund workflow; manual bookkeeping is forbidden".into()));
+        }
         if payment.status != "succeeded"
             || payment.currency != request.amount.currency
             || request.amount.amount > payment.amount
@@ -907,7 +909,7 @@ impl Repository {
             period_end: Set(request.period_end.fixed_offset()),
             amount: Set(summary.total.amount),
             currency: Set(summary.total.currency),
-            status: Set("issued".to_owned()),
+            status: Set("statement_ready".to_owned()),
             title: Set(request.title),
             issued_at: Set(Utc::now().fixed_offset()),
         }

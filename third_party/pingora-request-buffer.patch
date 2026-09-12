@@ -1,0 +1,12 @@
+diff --git a/src/protocols/http/v1/common.rs b/src/protocols/http/v1/common.rs
+--- a/src/protocols/http/v1/common.rs
++++ b/src/protocols/http/v1/common.rs
+@@ -32,1 +32,1 @@
+-pub(crate) const BODY_BUF_LIMIT: usize = 1024 * 64;
++pub(crate) const BODY_BUF_LIMIT: usize = 1024 * 1024;
+diff --git a/src/protocols/http/v2/server.rs b/src/protocols/http/v2/server.rs
+--- a/src/protocols/http/v2/server.rs
++++ b/src/protocols/http/v2/server.rs
+@@ -39,1 +39,1 @@
+-const BODY_BUF_LIMIT: usize = 1024 * 64;
++const BODY_BUF_LIMIT: usize = 1024 * 1024;
