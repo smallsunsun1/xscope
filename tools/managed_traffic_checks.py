@@ -10,17 +10,20 @@ import threading
 import time
 import urllib.request
 import uuid
+from datetime import datetime, timezone
 
 
-def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, eventually, console_call):
+def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, eventually, console_call, auto=False):
     cluster, namespace, deployment, serving = "synthetic-traffic", "synthetic-member", "synthetic-runtime", "synthetic-serving"
     model_id, project = "synthetic-managed-model", "synthetic-managed-project"
+    suffix = "-auto" if auto else ""
+    cluster, deployment, serving, model_id, project = [v + suffix for v in [cluster, deployment, serving, model_id, project]]
     model = {"id": model_id, "display_name": "Synthetic managed model", "max_context_tokens": 4096,
         "price_version": "synthetic-price", "input_per_million_tokens": {"currency": "CNY", "amount": 1},
         "output_per_million_tokens": {"currency": "CNY", "amount": 2}}
     assert api("PUT", "/model-catalog/" + model_id, {"expected_revision": 0, "enabled": True, "default_pool": None, "model": model}, internal=False)[0] == 200
     assert api("POST", "/projects", {"id": project, "tenant_id": "test-tenant", "name": "Synthetic managed fixture"}, internal=False)[0] == 201
-    status, key = api("POST", "/api-keys", {"id": "synthetic-managed-key", "project_id": project, "tenant_id": "test-tenant", "name": "Synthetic",
+    status, key = api("POST", "/api-keys", {"id": "synthetic-managed-key" + suffix, "project_id": project, "tenant_id": "test-tenant", "name": "Synthetic",
         "scopes": ["chat.completions"], "allowed_models": [model_id], "monthly_budget": {"currency": "CNY", "amount": 0}}, internal=False)
     assert status == 201
     status, identity = api("POST", "/clusters", {"id": cluster, "namespace": namespace, "credential_days": 1}, internal=False)
@@ -29,8 +32,10 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
         "runtime": {"image": "synthetic/runtime:test", "protocol": "openai", "port": 8000}, "replicas": 2, "resources": {"requests": {"cpu": "20m"}, "limits": {"cpu": "200m"}},
         "serving": {"endpointPickerService": serving, "endpointPickerPort": 9002}}
     desired = {"expected_version": 0, "deployments": [{"name": deployment, "spec": desired_spec, "delete_uid": None}]}
+    if auto:
+        desired_spec["autoscaling"] = {"managed": True, "minReplicas": 1, "maxReplicas": 3, "targetRunningRequests": 1}
     assert api("PUT", f"/clusters/{cluster}/desired-state", desired, internal=False)[0] == 200
-    state = {"model": None, "lease": None, "ready": False, "calls": 0, "cancelled": 0}
+    state = {"model": None, "lease": None, "ready": False, "calls": 0, "cancelled": 0, "recommendation": 2, "idle_enabled": False, "active": 0, "pods": {}, "headers": {}}
     streams_done = threading.Event()
     processes, logs, streams = [], [], []
     labels = {"app.kubernetes.io/name": deployment, "platform.xscope.io/deployment-uid": "synthetic-managed-uid"}
@@ -48,7 +53,26 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
             self.wfile.write(body)
 
         def do_GET(self):
-            if "/leases/" in self.path:
+            if "/api/v1/query" in self.path:
+                self.reply({"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [time.time(), "0"]}] if state["idle_enabled"] and state["active"] == 0 else []}})
+                return
+            if "/nodes/" in self.path:
+                value = {"apiVersion": "v1", "kind": "Node", "metadata": {"name": "synthetic-node", "uid": "synthetic-node-uid"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+            elif "/kube-node-lease/" in self.path:
+                value = {"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "metadata": {"name": "synthetic-node", "ownerReferences": [{"apiVersion": "v1", "kind": "Node", "name": "synthetic-node", "uid": "synthetic-node-uid"}]}, "spec": {"renewTime": datetime.now(timezone.utc).isoformat()}}
+            elif "/pods/" in self.path:
+                entry = state["pods"].get(self.path.split("?")[0].rsplit("/", 1)[1])
+                value = None if entry is None or entry.get("missing") else entry["pod"]
+                if value is not None and entry["process"].poll() is not None:
+                    cs = value["status"]["containerStatuses"][0]
+                    cs["state"] = {"terminated": {"exitCode": 137, "containerID": cs["containerID"]}}
+            elif "/modelscales/" in self.path:
+                value = {"apiVersion": "platform.xscope.io/v1alpha1", "kind": "ModelScale", "metadata": {"name": deployment, "uid": "synthetic-recommendation", "resourceVersion": str(state["recommendation"]), "ownerReferences": owner()}, "spec": {"modelUid": "synthetic-managed-uid", "replicas": state["recommendation"]}}
+            elif "/scaledobjects/" in self.path:
+                value = {"apiVersion": "keda.sh/v1alpha1", "kind": "ScaledObject", "metadata": {"name": deployment, "uid": "synthetic-scaler", "ownerReferences": owner()}, "spec": {"scaleTargetRef": {"apiVersion": "platform.xscope.io/v1alpha1", "kind": "ModelScale", "name": deployment}, "triggers": []}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+            elif "/horizontalpodautoscalers/" in self.path:
+                value = {"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "keda-hpa-" + deployment, "ownerReferences": [{"apiVersion": "keda.sh/v1alpha1", "kind": "ScaledObject", "name": deployment, "uid": "synthetic-scaler", "controller": True}]}, "spec": {"maxReplicas": 3, "scaleTargetRef": {"apiVersion": "platform.xscope.io/v1alpha1", "kind": "ModelScale", "name": deployment}}, "status": {"currentReplicas": 2, "desiredReplicas": state["recommendation"], "conditions": [{"type": "ScalingActive", "status": "True"}, {"type": "AbleToScale", "status": "True"}]}}
+            elif "/leases/" in self.path:
                 value = state["lease"]
             elif "/modeldeployments/" in self.path:
                 value = state["model"]
@@ -59,10 +83,10 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
                 value = {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": deployment if runtime else serving, "namespace": namespace,
                     "generation": 1, "resourceVersion": "1", "ownerReferences": owner() if runtime else []},
                     "spec": {"replicas": count, "selector": {"matchLabels": pod_labels}, "template": {"metadata": {"labels": pod_labels}, "spec": {"containers": []}}},
-                    "status": {"observedGeneration": 1, "updatedReplicas": count, "readyReplicas": count if state["ready"] else 0, "availableReplicas": count if state["ready"] else 0}}
+                    "status": {"replicas": count, "observedGeneration": 1, "updatedReplicas": count, "readyReplicas": count if state["ready"] else 0, "availableReplicas": count if state["ready"] else 0}}
             elif "/services/" in self.path:
                 value = {"apiVersion": "v1", "kind": "Service", "metadata": {"name": serving, "namespace": namespace,
-                    "annotations": {"platform.xscope.io/inference-pool": deployment, "platform.xscope.io/managed-only": "true"}}, "spec": {"selector": {"synthetic-entry": serving}, "ports": [{"port": 9002}, {"port": 8085}]}}
+                    "annotations": {"platform.xscope.io/inference-pool": deployment, "platform.xscope.io/managed-only": "true", "platform.xscope.io/traffic-protocol": "v2"}}, "spec": {"selector": {"synthetic-entry": serving}, "ports": [{"port": 9002}, {"port": 8085}]}}
             elif "/inferencepools/" in self.path:
                 value = {"apiVersion": "inference.networking.k8s.io/v1", "kind": "InferencePool", "metadata": {"name": deployment, "namespace": namespace, "ownerReferences": owner()},
                     "spec": {"selector": {"matchLabels": labels}, "targetPorts": [{"number": 8000}], "endpointPickerRef": {"name": serving, "port": {"number": 9002}, "failureMode": "FailClose"}}}
@@ -82,6 +106,13 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
             self.reply(value, 201)
 
         def do_PATCH(self):
+            if "/pods/" in self.path:
+                patch = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                value = state["pods"][self.path.split("?")[0].rsplit("/", 1)[1]]["pod"]
+                assert patch["metadata"]["uid"] == value["metadata"]["uid"]
+                value["metadata"].update(patch["metadata"])
+                self.reply(value)
+                return
             assert "/leases/" in self.path
             patch = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state["lease"]["spec"].update(patch.get("spec", {}))
@@ -116,6 +147,7 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
         def do_POST(self):
             body = bytearray()
             assert self.headers.get("x-xscope-managed-pool") == pool
+            state["headers"][self.headers.get("x-xscope-traffic-session")] = {k: self.headers[k] for k in ["x-xscope-managed-pool", "x-xscope-traffic-session", "x-xscope-traffic-token"]}
             while True:
                 size = int(self.rfile.readline().strip(), 16)
                 if not size:
@@ -125,6 +157,7 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
                 self.rfile.read(2)
             assert json.loads(body)["model"] == model_id
             state["calls"] += 1
+            state["active"] += 1
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Transfer-Encoding", "chunked")
@@ -146,6 +179,8 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 state["cancelled"] += 1
+            finally:
+                state["active"] -= 1
         def log_message(self, *args):
             pass
 
@@ -153,7 +188,7 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
     runtime = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Runtime)
     for server in [kube, runtime]:
         threading.Thread(target=server.serve_forever, daemon=True).start()
-    private = root / "managed-traffic"
+    private = root / ("managed-traffic" + suffix)
     private.mkdir(mode=0o700)
     def file(name, value):
         path = private / name
@@ -164,7 +199,7 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
     kubeconfig = file("kubeconfig.json", {"apiVersion": "v1", "kind": "Config", "current-context": "synthetic",
         "clusters": [{"name": "synthetic", "cluster": {"server": f"http://127.0.0.1:{kube.server_port}"}}],
         "contexts": [{"name": "synthetic", "context": {"cluster": "synthetic", "user": "synthetic"}}], "users": [{"name": "synthetic", "user": {}}]})
-    config = file("config.json", {"cluster_id": cluster, "namespace": namespace, "control_url": f"http://127.0.0.1:{configs[0][1]}", "credential_file": credential, "allow_local_http": True})
+    config = file("config.json", {"cluster_id": cluster, "namespace": namespace, "control_url": f"http://127.0.0.1:{configs[0][1]}", "credential_file": credential, "allow_local_http": True, "prometheus_url": f"http://127.0.0.1:{kube.server_port}"})
     def launch(binary, env, name):
         log = (private / (name + ".log")).open("wb")
         logs.append(log)
@@ -190,7 +225,7 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
             "closed": closed, "active": {p["id"]: (counts or {}).get(p["id"], 0) for p in grant["pools"]}})
     try:
         binding = {"cluster_id": cluster, "deployment": deployment, "serving_service": serving, "expected_desired_version": 1,
-            "address": f"127.0.0.1:{runtime.server_port}", "make_default": True}
+            "address": f"127.0.0.1:{runtime.server_port}", "make_default": True, "traffic_protocol": 2}
         assert console_call("POST", "/managed-pools", binding, "console-smoke-member")[0] == 403
         status, bound = api("POST", "/managed-pools", binding, internal=False)
         assert status == 200, bound
@@ -224,7 +259,13 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
                 XSCOPE_POLICY_REFRESH_SECONDS="1", XSCOPE_BILLING_RESERVATIONS="false", XSCOPE_REDIS_URL="", XSCOPE_USAGE_MODE="memory",
                 XSCOPE_API_KEYS_JSON="[]", XSCOPE_ADDITIONAL_SERVING_JSON="[]", XSCOPE_GATEWAY_GRACE_SECONDS="1",
                 XSCOPE_SERVING_ENTRY_JSON=json.dumps({"id": "synthetic-legacy", "model": "xscope-demo", "revision": "synthetic", "address": f"127.0.0.1:{runtime.server_port}"}))
-            launch(gateway_binary, env, f"gateway-{index}")
+            if auto:
+                pod_name = f"synthetic-gateway-{index}"
+                pod_uid = f"synthetic-gateway-uid-{index}"
+                env.update(XSCOPE_GATEWAY_CLUSTER_ID=cluster, XSCOPE_POD_NAMESPACE=namespace, XSCOPE_POD_NAME=pod_name, XSCOPE_POD_UID=pod_uid)
+            process = launch(gateway_binary, env, f"gateway-{index}")
+            if auto:
+                state["pods"][pod_name] = {"process": process, "pod": {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": pod_name, "namespace": namespace, "uid": pod_uid, "resourceVersion": "1", "labels": {"app.kubernetes.io/name": "gateway"}}, "spec": {"nodeName": "synthetic-node", "containers": [{"name": "gateway", "ports": [{"name": "http", "containerPort": address}]}]}, "status": {"podIP": "127.0.0.1", "containerStatuses": [{"name": "gateway", "image": "synthetic/gateway", "imageID": "synthetic", "containerID": "containerd://synthetic-" + str(index), "ready": True, "restartCount": 0, "state": {"running": {}}}]}}}
         def gateway_ready(address):
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{address}/readyz", timeout=1) as response:
@@ -241,6 +282,36 @@ def verify(api, sql, root, configs, token, gateway_binary, agent_binary, port, e
             streams.append((connection, response))
         eventually(lambda: sum(p["active_requests"] for p in pool_status()["participants"]) == 2)
         own_sessions = {p["session_id"] for p in pool_status()["participants"] if p["active_requests"] > 0}
+        if auto:
+            state["recommendation"] = 1
+            eventually(lambda: pool_status()["state"] == "draining")
+            assert state["model"]["spec"]["replicas"] == 2
+            processes[1].kill()
+            processes[1].wait(timeout=5)
+            streams[0][1].close()
+            streams[0][0].close()
+            eventually(lambda: any(p["retired"] and p["active_requests"] == -1 for p in pool_status()["participants"]))
+            dead = next(p["session_id"] for p in pool_status()["participants"] if p["active_requests"] == -1)
+            rejected = urllib.request.Request(f"http://127.0.0.1:{configs[0][1]}/internal/v1/traffic/authorize", headers=state["headers"][dead])
+            try:
+                urllib.request.urlopen(rejected, timeout=3)
+                raise AssertionError("retired gateway capability accepted")
+            except urllib.error.HTTPError as error:
+                assert error.code == 403
+            streams_done.set()
+            assert b"[DONE]" in streams[1][1].read()
+            streams[1][1].close()
+            streams[1][0].close()
+            time.sleep(2)
+            assert state["model"]["spec"]["replicas"] == 2  # Missing idle evidence is not zero.
+            state["idle_enabled"] = True
+            eventually(lambda: state["model"]["spec"]["replicas"] == 1)
+            eventually(lambda: pool_status()["state"] == "active")
+            state["recommendation"] = 2
+            eventually(lambda: state["model"]["spec"]["replicas"] == 2)
+            eventually(lambda: pool_status()["state"] == "active")
+            print("PASS automatic KEDA recommendations: drain before shrink, real Gateway process kill + kubelet fixture proof, orphan work stays unknown until post-fence idle, retired capability denied, 2 -> 1 -> 2 and automatic reopening", flush=True)
+            return
         # Model revision traffic has a real per-Gateway version ACK, not just a saved DB row.
         route = f"/projects/{project}/models/{model_id}/route-policy"
         assert api("PUT", route, {"expected_revision": 0, "spec": {"stable_pool": pool, "canary_percent": 0, "headers": []}}, internal=False)[0] == 200

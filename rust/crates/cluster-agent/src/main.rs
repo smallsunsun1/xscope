@@ -188,6 +188,15 @@ async fn create(
     model.metadata.resource_version = None;
     model.metadata.owner_references = None;
     model.metadata.managed_fields = None;
+    model
+        .labels_mut()
+        .remove("platform.xscope.io/desired-cluster");
+    for key in [
+        "platform.xscope.io/desired-version",
+        "platform.xscope.io/desired-sha256",
+    ] {
+        model.annotations_mut().remove(key);
+    }
     let namespace = model
         .namespace()
         .ok_or_else(|| Error::Invalid("namespace missing after validation".into()))?;
@@ -220,6 +229,15 @@ async fn update(
     validate_name(&name, false)?;
     let api: Api<ModelDeployment> = Api::namespaced(app.client, &ns);
     let mut model = api.get(&name).await?;
+    if model
+        .labels()
+        .contains_key("platform.xscope.io/desired-cluster")
+    {
+        return Err(Error::Conflict(
+            "deployment belongs to the outbound desired-state writer".into(),
+        )
+        .into());
+    }
     if request.resource_version.is_empty()
         || model.metadata.resource_version.as_deref() != Some(&request.resource_version)
     {
@@ -253,6 +271,15 @@ async fn scale(
             Error::Invalid("disable autoscaling before manually scaling replicas".into()).into(),
         );
     }
+    if model
+        .labels()
+        .contains_key("platform.xscope.io/desired-cluster")
+    {
+        return Err(Error::Conflict(
+            "deployment belongs to the outbound desired-state writer".into(),
+        )
+        .into());
+    }
     model.spec.replicas = request.replicas;
     validate(&mut model)?;
     Ok(Json(
@@ -266,7 +293,31 @@ async fn remove(
     validate_name(&ns, true)?;
     validate_name(&name, false)?;
     let api: Api<ModelDeployment> = Api::namespaced(app.client, &ns);
-    match api.delete(&name, &DeleteParams::default()).await {
+    let Some(model) = api.get_opt(&name).await? else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
+    if model
+        .labels()
+        .contains_key("platform.xscope.io/desired-cluster")
+    {
+        return Err(Error::Conflict(
+            "deployment belongs to the outbound desired-state writer".into(),
+        )
+        .into());
+    }
+    match api
+        .delete(
+            &name,
+            &DeleteParams {
+                preconditions: Some(kube::api::Preconditions {
+                    uid: model.uid(),
+                    resource_version: model.resource_version(),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+    {
         Ok(_) => {}
         Err(kube::Error::Api(e)) if e.code == 404 => {}
         Err(e) => return Err(e.into()),

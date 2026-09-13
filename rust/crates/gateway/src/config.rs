@@ -5,6 +5,7 @@ use thiserror::Error;
 
 #[derive(Clone, Debug)]
 pub struct Settings {
+    pub gateway_identity: Option<xscope_domain::traffic::GatewayIdentity>,
     pub listen: String,
     pub region: String,
     pub model_revision: String,
@@ -56,6 +57,8 @@ pub struct ServingConfig {
 
 #[derive(Debug, Error)]
 pub enum SettingsError {
+    #[error("gateway identity requires cluster ID and Downward API namespace/name/UID")]
+    InvalidIdentity,
     #[error("WAL mode was removed; XSCOPE_USAGE_MODE may only be memory")]
     InvalidUsageMode,
     #[error("HTTP usage reporting requires XSCOPE_CONTROL_INTERNAL_URL and XSCOPE_INTERNAL_TOKEN")]
@@ -131,6 +134,22 @@ impl Settings {
             return Err(SettingsError::InvalidBilling);
         }
         Ok(Self {
+            gateway_identity: if let Ok(cluster_id) = env::var("XSCOPE_GATEWAY_CLUSTER_ID") {
+                let get = |key| {
+                    env::var(key)
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                        .ok_or(SettingsError::InvalidIdentity)
+                };
+                Some(xscope_domain::traffic::GatewayIdentity {
+                    cluster_id,
+                    namespace: get("XSCOPE_POD_NAMESPACE")?,
+                    pod: get("XSCOPE_POD_NAME")?,
+                    pod_uid: get("XSCOPE_POD_UID")?,
+                })
+            } else {
+                None
+            },
             listen: env_or("XSCOPE_GATEWAY_ADDRESS", "0.0.0.0:8080"),
             region: env_or("XSCOPE_REGION", "local"),
             model_revision,

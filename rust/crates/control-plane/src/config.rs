@@ -11,7 +11,10 @@ pub struct Config {
     pub public_address: SocketAddr,
     pub internal_address: SocketAddr,
     pub database_url: String,
+    pub database_pool: DatabasePool,
     pub internal_token: String,
+    pub alert_webhook_token: Option<String>,
+    pub ops_prometheus_url: Option<String>,
     pub console_auth: bool,
     pub console_directory: Option<PathBuf>,
     pub cluster_agent_url: String,
@@ -23,6 +26,33 @@ pub struct Config {
     pub bootstrap_api_keys_json: String,
     pub component_targets: Vec<(String, String)>,
     pub route_pools: Vec<xscope_domain::RoutePool>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DatabasePool {
+    pub max: u32,
+    pub min: u32,
+    pub acquire_ms: u64,
+}
+impl DatabasePool {
+    fn parse(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let number = |name, fallback, min, max| {
+            get(name)
+                .map_or(Ok(fallback), |v| v.parse::<u32>())
+                .ok()
+                .filter(|v| (min..=max).contains(v))
+                .ok_or_else(|| ConfigError::Invalid {
+                    name,
+                    message: "outside supported range".into(),
+                })
+        };
+        let max = number("XSCOPE_DB_MAX_CONNECTIONS", 4, 1, 128)?;
+        Ok(Self {
+            max,
+            min: number("XSCOPE_DB_MIN_CONNECTIONS", 0, 0, max)?,
+            acquire_ms: u64::from(number("XSCOPE_DB_ACQUIRE_TIMEOUT_MS", 2000, 100, 30000)?),
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -56,7 +86,12 @@ impl Config {
             public_address: address("XSCOPE_CONTROL_ADDRESS", "0.0.0.0:8081")?,
             internal_address: address("XSCOPE_CONTROL_INTERNAL_ADDRESS", "0.0.0.0:8084")?,
             database_url,
+            database_pool: DatabasePool::parse(|key| env::var(key).ok())?,
             internal_token,
+            alert_webhook_token: env::var("XSCOPE_ALERT_WEBHOOK_TOKEN")
+                .ok()
+                .filter(|v| v.len() >= 32),
+            ops_prometheus_url: env::var("XSCOPE_OPS_PROMETHEUS_URL").ok(),
             console_auth: env_or("XSCOPE_CONSOLE_AUTH", "disabled") == "trusted-headers",
             console_directory,
             cluster_agent_url: env_or("XSCOPE_CLUSTER_AGENT_URL", "http://cluster-agent:8083"),
@@ -118,4 +153,22 @@ fn address(name: &'static str, fallback: &str) -> Result<SocketAddr, ConfigError
         name,
         message: error.to_string(),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    #[test]
+    fn database_pool_rejects_unbounded_or_inverted_configuration() {
+        assert_eq!(DatabasePool::parse(|_| None).unwrap().max, 4);
+        assert!(
+            DatabasePool::parse(|key| (key == "XSCOPE_DB_MIN_CONNECTIONS").then(|| "5".into()))
+                .is_err()
+        );
+        assert!(
+            DatabasePool::parse(|key| (key == "XSCOPE_DB_MAX_CONNECTIONS").then(|| "0".into()))
+                .is_err()
+        );
+    }
 }

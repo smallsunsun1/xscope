@@ -21,12 +21,22 @@ def main():
         raise RuntimeError("Unexpected Prometheus image; test did not run")
     rules_value = yaml.safe_load(rules.read_text())
     alerts = {r["alert"]: r for group in rules_value["groups"] for r in group["rules"] if "alert" in r}
-    def alert(name, when, firing):
+    def alert(name, when, firing, extra=None):
         source = alerts[name]
-        return {"eval_time": when, "alertname": name, "exp_alerts": [{"exp_labels": source["labels"], "exp_annotations": source["annotations"]}] if firing else []}
+        return {"eval_time": when, "alertname": name, "exp_alerts": [{"exp_labels": {**source["labels"], **(extra or {})}, "exp_annotations": source["annotations"]}] if firing else []}
     def ratio(expected):
         return {"expr": "xscope:slo_availability_error_ratio:5m", "eval_time": "2h", "exp_samples": [{"labels": '{__name__="xscope:slo_availability_error_ratio:5m"}', "value": expected}]}
     tests = [
+        {"interval": "1m", "input_series": [
+            {"series": 'kube_cronjob_created{namespace="xscope-system",cronjob="xscope-business-backup"}', "values": "0+0x1680"}],
+         "alert_rule_test": [alert("XScopeBusinessBackupStale", "1h", False), alert("XScopeBusinessBackupStale", "27h", True, {"namespace": "xscope-system", "cronjob": "xscope-business-backup"})]},
+        {"interval": "1m", "input_series": [
+            {"series": 'kube_cronjob_created{namespace="xscope-system",cronjob="xscope-business-backup"}', "values": "0+0x1680"},
+            {"series": 'kube_cronjob_status_last_successful_time{namespace="xscope-system",cronjob="xscope-business-backup"}', "values": "0+0x1560 93660+0x120"}],
+         "alert_rule_test": [alert("XScopeBusinessBackupStale", "27h", False)]},
+        {"interval": "1m", "input_series": [
+            {"series": 'kube_job_status_failed{namespace="xscope-system",job_name="xscope-business-backup-test"}', "values": "1+0x20"}],
+         "alert_rule_test": [alert("XScopeBusinessBackupFailed", "10m", True, {"namespace": "xscope-system", "job_name": "xscope-business-backup-test"})]},
         {"interval": "1m", "input_series": [
             {"series": 'xscope_usage_queue{kind="oldest_seconds"}', "values": "31+0x60"},
             {"series": 'xscope_usage_queue{kind="ready"}', "values": "0+0x60"},

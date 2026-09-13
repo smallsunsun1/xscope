@@ -29,6 +29,8 @@ from cluster_pull_checks import verify as verify_cluster_pull
 from payment_checks import verify as verify_payments
 from model_catalog_checks import verify as verify_catalog
 from managed_traffic_checks import verify as verify_managed_traffic
+from ops_checks import verify as verify_ops
+from billing_load_checks import verify as verify_load
 
 
 def port():
@@ -60,7 +62,7 @@ def main():
             image = "postgres:16-alpine"
             subprocess.run(["docker", "image", "inspect", image], check=True, stdout=subprocess.DEVNULL)
             container = subprocess.check_output(["docker", "run", "--rm", "-d", "--name", "xscope-money-smoke-" + uuid.uuid4().hex[:10],
-                "--cpus", "0.5", "--memory", "192m", "-p", "127.0.0.1::5432", "-e", "POSTGRES_PASSWORD=" + token, image], text=True).strip()
+                "--cpus", "0.5", "--memory", "192m", "-p", "127.0.0.1::5432", "-e", "POSTGRES_PASSWORD", image], env={**os.environ, "POSTGRES_PASSWORD": token}, text=True).strip()
             pg_port = int(subprocess.check_output(["docker", "port", container, "5432/tcp"], text=True).strip().rsplit(":", 1)[1])
             # Image initialization briefly exposes a temporary Unix-socket-only
             # server. Wait for the final TCP listener used by the application.
@@ -102,7 +104,7 @@ def main():
             for index in range(2):
                 public, private = port(), port()
                 env = dict(os.environ, XSCOPE_DATABASE_URL=f"postgres://postgres:{token}@127.0.0.1:{pg_port}/postgres",
-                    XSCOPE_INTERNAL_TOKEN=token, XSCOPE_CONTROL_ADDRESS=f"127.0.0.1:{public}", XSCOPE_CONTROL_INTERNAL_ADDRESS=f"127.0.0.1:{private}",
+                    XSCOPE_INTERNAL_TOKEN=token, XSCOPE_ALERT_WEBHOOK_TOKEN=token, XSCOPE_CONTROL_ADDRESS=f"127.0.0.1:{public}", XSCOPE_CONTROL_INTERNAL_ADDRESS=f"127.0.0.1:{private}",
                     XSCOPE_METRICS_ADDRESS=f"127.0.0.1:{port()}", XSCOPE_EVENT_WORKER_ENABLED="false", XSCOPE_CONSOLE_AUTH="disabled", XSCOPE_BOOTSTRAP_API_KEYS_JSON="[]", XSCOPE_DEFAULT_TENANT_ID="test-tenant")
                 env.pop("XSCOPE_CONSOLE_DIR", None)
                 configs.append((public, private, env))
@@ -125,6 +127,32 @@ def main():
 
             def path(name, project="funded"):
                 return f"/billing/projects/{project}/reservations/{name}"
+
+            if "--load-only" in sys.argv:
+                verify_load(api, sql, setup, request)
+                # SIGTERM must drain an already accepted internal HTTP body,
+                # not abort the financial listener as soon as public HTTP stops.
+                connection = http.client.HTTPConnection("127.0.0.1", configs[0][1], timeout=5)
+                connection.putrequest("POST", "/internal/v1/billing/reservations")
+                connection.putheader("Content-Type", "application/json")
+                connection.putheader("Authorization", "Bearer " + token)
+                connection.putheader("Content-Length", "2")
+                connection.endheaders(); connection.send(b"{")
+                def in_progress():
+                    with urllib.request.urlopen("http://" + configs[0][2]["XSCOPE_METRICS_ADDRESS"] + "/metrics", timeout=2) as response:
+                        return 'xscope_http_inflight{route="/internal/v1/billing/reservations"} 1' in response.read().decode()
+                eventually(in_progress)
+                processes[0].terminate()
+                time.sleep(.15)
+                assert processes[0].poll() is None
+                connection.send(b"}")
+                response = connection.getresponse()
+                assert response.status in (400, 422)
+                response.read(); connection.close()
+                assert processes[0].wait(timeout=10) == 0
+                print("PASS SIGTERM drains the accepted internal HTTP request and exits cleanly; no financial hold created by shutdown probe", flush=True)
+                success = True
+                return
 
             setup("funded", funded=True)
             setup("budget", budget=1)
@@ -363,9 +391,11 @@ def main():
             assert console_get(pending_path + "?limit=101", "console-smoke-owner")[0] == 400
             print("PASS console positions and bounded pending discovery: anonymous/outsider denied, member financial read, owner-only evidence list, exact string money and redacted DTO", flush=True)
             verify_worker_console(console_call, sql)
+            verify_ops(api, console_call, sql)
             verify_cluster_console(console_call)
             verify_catalog(api, sql, setup, request, console_call)
             verify_managed_traffic(api, sql, root, configs, token, runfiles.Create().Rlocation(sys.argv[2]), runfiles.Create().Rlocation(sys.argv[3]), port, eventually, console_call)
+            verify_managed_traffic(api, sql, root, configs, token, runfiles.Create().Rlocation(sys.argv[2]), runfiles.Create().Rlocation(sys.argv[3]), port, eventually, console_call, auto=True)
             verify_reviews(console_call, api, sql, setup, request)
             review_path = "/billing/accounts/review-money/reviews/case-a"
             persisted_review = console_get(review_path, "finance-reviewer")[1]

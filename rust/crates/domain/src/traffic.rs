@@ -11,6 +11,8 @@ pub fn managed(id: &str) -> bool {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PoolBinding {
+    #[serde(default = "legacy_protocol")]
+    pub traffic_protocol: u32,
     /// Assign only an unbound default; never replace an existing stable route.
     #[serde(default)]
     pub make_default: bool,
@@ -25,6 +27,9 @@ pub struct PoolBinding {
     #[serde(default)]
     pub server_name: String,
     pub expected_desired_version: i64,
+}
+fn legacy_protocol() -> u32 {
+    1
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -62,6 +67,8 @@ pub struct TrafficReport {
 #[serde(deny_unknown_fields)]
 pub struct ObservationTask {
     #[serde(default)]
+    pub traffic_protocol: u32,
+    #[serde(default)]
     pub idle_after: Option<String>,
     pub pool_id: String,
     pub generation: i64,
@@ -76,6 +83,8 @@ pub struct ObservationTask {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PoolObservation {
+    #[serde(default)]
+    pub idle_after: Option<String>,
     #[serde(default)]
     pub applied_replicas: i32,
     #[serde(default)]
@@ -118,6 +127,8 @@ pub struct GatewayRuntime {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GatewayProofTask {
+    #[serde(default)]
+    pub release_finalizer: bool,
     pub session_id: String,
     pub nonce: String,
     pub identity: GatewayIdentity,

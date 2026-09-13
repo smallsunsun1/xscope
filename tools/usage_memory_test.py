@@ -43,6 +43,10 @@ class MemoryUsageTest(unittest.TestCase):
         self.rows, self.settled, self.unresolved = {}, {}, {}
         self.attempts = collections.Counter()
         self.calls = 0
+        self.admission_gate = threading.Event()
+        self.admission_gate.set()
+        self.admission_active = 0
+        self.admission_peak = 0
         self.failure = 0
         self.drop_ack = False
         self.drop_admission_ack = None
@@ -91,6 +95,13 @@ class MemoryUsageTest(unittest.TestCase):
                     raw.extend(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 body = json.loads(raw or "{}")
                 action = self.path.rsplit("/", 1)[1]
+                if action == "reservations":
+                    with fixture.lock:
+                        fixture.admission_active += 1
+                        fixture.admission_peak = max(fixture.admission_peak, fixture.admission_active)
+                    fixture.admission_gate.wait(10)
+                    with fixture.lock:
+                        fixture.admission_active -= 1
                 if action == "completions":
                     with fixture.lock:
                         fixture.calls += 1
@@ -170,6 +181,7 @@ class MemoryUsageTest(unittest.TestCase):
             XSCOPE_INTERNAL_TOKEN="test-internal", XSCOPE_REDIS_URL="", XSCOPE_BILLING_RESERVATIONS="true",
             XSCOPE_CONTROL_INTERNAL_URL=f"http://127.0.0.1:{self.server.server_port}/internal/v1",
             XSCOPE_MODEL_CONTEXT_TOKENS="128", XSCOPE_USAGE_QUEUE_CAPACITY="4", XSCOPE_USAGE_REPORT_WORKERS="1",
+            XSCOPE_BILLING_ADMISSION_WORKERS="2", XSCOPE_BILLING_ADMISSION_CAPACITY="64", XSCOPE_BILLING_ADMISSION_TIMEOUT_MS="8000",
             XSCOPE_USAGE_MAX_PENDING_SECONDS="1", XSCOPE_USAGE_DRAIN_SECONDS="2", XSCOPE_GATEWAY_GRACE_SECONDS="1",
             XSCOPE_ADDITIONAL_SERVING_JSON="[]", XSCOPE_SERVING_ENTRY_JSON=json.dumps({"id": "test-pool", "model": "xscope-demo",
                 "revision": "development", "address": f"127.0.0.1:{self.server.server_port}"}),
@@ -213,6 +225,7 @@ class MemoryUsageTest(unittest.TestCase):
 
     def tearDown(self):
         self.gate.set()
+        self.admission_gate.set()
         if self.process and self.process.poll() is None:
             self.process.kill()
             self.process.wait(timeout=5)
@@ -221,6 +234,39 @@ class MemoryUsageTest(unittest.TestCase):
         for log in self.logs:
             log.close()
         self.directory.cleanup()
+
+    def test_bounded_parallel_admission_and_overload(self):
+        self.env["XSCOPE_BILLING_ADMISSION_CAPACITY"] = "1"
+        self.admission_gate.clear()
+        self.start()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            first = executor.submit(self.infer)
+            second = executor.submit(self.infer)
+            eventually(lambda: self.admission_peak == 2)
+            third = executor.submit(self.infer)
+            eventually(lambda: 'xscope_billing_admission{kind="occupied"} 3' in self.metrics())
+            self.assertEqual(self.infer()[0], 503)
+            self.admission_gate.set()
+            self.assertEqual([first.result()[0], second.result()[0], third.result()[0]], [200] * 3)
+        eventually(lambda: len(self.settled) == 3)
+        self.assertEqual(self.admission_peak, 2)
+        self.assertEqual(self.calls, 3)
+        self.assertIn('outcome="queue_rejected"', self.metrics())
+
+    def test_expired_queued_admission_never_dispatches(self):
+        self.admission_gate.clear()
+        self.env.update(XSCOPE_BILLING_ADMISSION_WORKERS="1", XSCOPE_BILLING_ADMISSION_TIMEOUT_MS="300")
+        self.start()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(self.infer)
+            eventually(lambda: self.admission_active == 1)
+            second = executor.submit(self.infer)
+            self.assertEqual(first.result()[0], 503)
+            self.assertEqual(second.result()[0], 503)
+            self.admission_gate.set()
+        eventually(lambda: len(self.rows) == 1 and next(iter(self.rows.values()))["state"] == "released")
+        self.assertEqual(self.calls, 0)
+        self.assertFalse(any(action == "dispatch" for _, action in self.attempts))
 
     def test_removed_mode_and_missing_reporter_fail_startup(self):
         for config, message in [

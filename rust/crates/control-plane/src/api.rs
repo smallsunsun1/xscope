@@ -88,6 +88,13 @@ impl AppState {
 pub fn public_router(state: &AppState) -> Router {
     let admin = Router::new()
         .route("/session", get(session))
+        .route("/capabilities", get(console_capabilities))
+        .route("/operations/alerts", get(ops_alerts))
+        .route("/operations/backup", get(backup_status))
+        .route(
+            "/operations/alerts/{id}/acknowledge",
+            post(acknowledge_alert),
+        )
         .route("/audit", get(list_operation_audits))
         .route("/users", get(list_users))
         .route(
@@ -290,8 +297,21 @@ pub fn internal_router(state: AppState) -> Router {
         .route_layer(middleware::from_fn_with_state(state.clone(), internal_auth))
         // These handlers verify the cluster-specific credential themselves.
         // A Gateway internal token is deliberately insufficient here.
+        .route("/internal/v1/operations/alerts", post(receive_alerts))
         .route("/internal/v1/clusters/{id}/poll", post(poll_cluster))
         .route("/internal/v1/clusters/{id}/report", post(report_cluster))
+        .route(
+            "/internal/v1/traffic/authorize",
+            get(authorize_serving).post(authorize_serving),
+        )
+        .route(
+            "/internal/v1/traffic/authorize/{*rest}",
+            get(authorize_serving).post(authorize_serving),
+        )
+        .route(
+            "/internal/v1/clusters/{id}/gateway-proofs",
+            get(gateway_proof_tasks).post(gateway_proof),
+        )
         .route(
             "/internal/v1/clusters/{id}/observations",
             get(observation_tasks).post(observe_pool),
@@ -311,6 +331,72 @@ fn platform_admin(state: &AppState, context: &UserContext) -> ServiceResult<()> 
     } else {
         Err(ServiceError::Forbidden)
     }
+}
+async fn console_capabilities(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+) -> Json<Value> {
+    Json(
+        json!({"platform_admin":platform_admin(&state, &context).is_ok(), "billing_reviewer":is_billing_reviewer(&state, &context), "evidence_submission":!context.auth_disabled, "alert_receiver_configured":state.config.alert_webhook_token.is_some()}),
+    )
+}
+async fn receive_alerts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> ServiceResult<StatusCode> {
+    use subtle::ConstantTimeEq;
+    let token = state
+        .config
+        .alert_webhook_token
+        .as_ref()
+        .ok_or(ServiceError::InternalAuthUnavailable)?;
+    let supplied = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(ServiceError::Unauthorized)?;
+    if !bool::from(token.as_bytes().ct_eq(supplied.as_bytes())) {
+        return Err(ServiceError::Unauthorized);
+    }
+    if body.len() > 262144 {
+        return Err(ServiceError::Invalid("alert payload too large".into()));
+    }
+    let request = serde_json::from_slice(&body)
+        .map_err(|_| ServiceError::Invalid("invalid alert payload".into()))?;
+    state.repository.receive_alerts(request).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn ops_alerts(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Query(query): Query<crate::ops::AlertQuery>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(state.repository.ops_alerts(query).await?))
+}
+async fn backup_status(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(
+        crate::ops::backup_status(state.config.ops_prometheus_url.as_deref()).await?,
+    ))
+}
+async fn acknowledge_alert(
+    State(state): State<AppState>,
+    Extension(context): Extension<UserContext>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::ops::Acknowledge>,
+) -> ServiceResult<Json<Value>> {
+    platform_admin(&state, &context)?;
+    Ok(Json(
+        state
+            .repository
+            .acknowledge_alert(&id, &context.user.id, request)
+            .await?,
+    ))
 }
 async fn list_clusters(
     State(state): State<AppState>,
@@ -1501,7 +1587,19 @@ async fn gateway_snapshot(
     Query(query): Query<GatewayQuery>,
 ) -> ServiceResult<Json<xscope_domain::GatewaySnapshot>> {
     Ok(Json(if let Some(id) = query.session {
-        state.repository.traffic_snapshot(&id).await?
+        state
+            .repository
+            .traffic_snapshot(
+                &id,
+                query
+                    .identity
+                    .map(|value| {
+                        serde_json::from_str(&value)
+                            .map_err(|_| ServiceError::Invalid("invalid gateway identity".into()))
+                    })
+                    .transpose()?,
+            )
+            .await?
     } else {
         state.repository.gateway_snapshot().await?
     }))
@@ -1510,6 +1608,40 @@ async fn gateway_snapshot(
 #[derive(Deserialize)]
 struct GatewayQuery {
     session: Option<String>,
+    identity: Option<String>,
+}
+
+async fn authorize_serving(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ServiceResult<StatusCode> {
+    state.repository.authorize_serving(&headers).await?;
+    Ok(StatusCode::OK)
+}
+async fn gateway_proof_tasks(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        state
+            .repository
+            .gateway_proof_tasks(&id, cluster_bearer(&headers)?)
+            .await?,
+    ))
+}
+async fn gateway_proof(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(proof): Json<xscope_domain::traffic::GatewayProof>,
+) -> ServiceResult<Json<Value>> {
+    Ok(Json(
+        state
+            .repository
+            .gateway_proof(&id, cluster_bearer(&headers)?, proof)
+            .await?,
+    ))
 }
 async fn route_acks(
     State(state): State<AppState>,

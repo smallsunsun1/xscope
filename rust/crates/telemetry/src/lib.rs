@@ -259,12 +259,33 @@ struct Metrics {
     event_worker_state: IntGaugeVec,
     usage_queue: IntGaugeVec,
     pending_hold_age: IntGaugeVec,
+    admission: IntGaugeVec,
+    admission_duration: HistogramVec,
 }
 // Metric names, help strings and label sets are compile-time constants; each
 // descriptor is unique in this private registry, so construction/registration cannot fail.
 #[allow(clippy::unwrap_used)]
 static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let registry = Registry::new();
+    let admission = IntGaugeVec::new(
+        Opts::new(
+            "xscope_billing_admission",
+            "Bounded volatile admission workers and occupied slots",
+        ),
+        &["kind"],
+    )
+    .unwrap();
+    let admission_duration = HistogramVec::new(
+        HistogramOpts::new(
+            "xscope_billing_admission_duration_seconds",
+            "Queue wait and reserve/dispatch HTTP latency",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1., 3., 8., 15., 60.,
+        ]),
+        &["phase"],
+    )
+    .unwrap();
     let pending_hold_age = IntGaugeVec::new(Opts::new("xscope_billing_pending_oldest_seconds", "Oldest central pending reservation, including orphaned Gateway requests; age alone never authorizes release"), &["state"]).unwrap();
     let usage_queue = IntGaugeVec::new(
         Opts::new(
@@ -338,6 +359,8 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     )
     .unwrap();
     for collector in [
+        Box::new(admission.clone()) as Box<dyn prometheus::core::Collector>,
+        Box::new(admission_duration.clone()) as Box<dyn prometheus::core::Collector>,
         Box::new(pending_hold_age.clone()) as Box<dyn prometheus::core::Collector>,
         Box::new(usage_queue.clone()) as Box<dyn prometheus::core::Collector>,
         Box::new(event_worker_state.clone()) as Box<dyn prometheus::core::Collector>,
@@ -352,6 +375,8 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         registry.register(collector).unwrap();
     }
     Metrics {
+        admission,
+        admission_duration,
         pending_hold_age,
         usage_queue,
         event_worker_state,
@@ -365,6 +390,28 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         routes,
     }
 });
+
+pub fn admission_change(kind: &'static str, delta: i64) {
+    if matches!(kind, "occupied" | "active") {
+        METRICS.admission.with_label_values(&[kind]).add(delta);
+    }
+}
+pub fn admission_limits(workers: usize, capacity: usize) {
+    for (kind, value) in [("workers", workers), ("queue_capacity", capacity)] {
+        METRICS
+            .admission
+            .with_label_values(&[kind])
+            .set(value as i64);
+    }
+}
+pub fn admission_duration(phase: &'static str, seconds: f64) {
+    if matches!(phase, "queue" | "protocol") {
+        METRICS
+            .admission_duration
+            .with_label_values(&[phase])
+            .observe(seconds);
+    }
+}
 
 pub fn background_event(operation: &'static str, outcome: &'static str) {
     METRICS

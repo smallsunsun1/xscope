@@ -2,6 +2,8 @@
 
 继续使用 React + Ant Design + TanStack Query；所有构建、类型检查和镜像打包经过 Bazel，不引入新的常驻 UI 服务。
 
+2026-09-13 新增运行与恢复、发布历史/动作、证据核查/独立审批和事件重试；权限、验收及剩余边界见 [本轮说明](reliability-operations.md)。下方只读待核查界面的描述为历史版本。
+
 ## 使用入口
 
 - `/#/dashboard`：本期已入账请求、Tokens、费用、ModelDeployment 就绪副本，以及有效密钥和已登记 Pool。存活检查不是推理链路就绪证明；未完成/未知用量不包含在已入账请求中。

@@ -6,12 +6,14 @@ use crate::{
     managed_pools::{decode, encode},
     repository::Repository,
 };
+use base64::Engine;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect, TransactionTrait,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use xscope_domain::{
     GatewaySnapshot,
     catalog::ServingEndpoint,
@@ -46,11 +48,18 @@ impl Repository {
             json!({"revision":policy.revision,"known_sessions_only":true,"all_known_acknowledged":complete,"sessions":sessions}),
         )
     }
-    pub async fn traffic_snapshot(&self, id: &str) -> ServiceResult<GatewaySnapshot> {
+    pub async fn traffic_snapshot(
+        &self,
+        id: &str,
+        identity: Option<xscope_domain::traffic::GatewayIdentity>,
+    ) -> ServiceResult<GatewaySnapshot> {
         if uuid::Uuid::parse_str(id).is_err() {
             return Err(invalid("invalid gateway incarnation"));
         }
         let mut snapshot = self.gateway_snapshot().await?;
+        if let Some(identity) = &identity {
+            crate::gateway_proofs::validate_identity(&self.db, identity).await?;
+        }
         let tx = self.db.begin().await?;
         // Drain and snapshot grant serialize on these rows, including a lost GET reply.
         let pools = pool::Entity::find()
@@ -60,6 +69,13 @@ impl Repository {
             .await?;
         let time = now(&tx).await?;
         session::Entity::insert(session::ActiveModel {
+            gateway_cluster_id: Set(identity.as_ref().map(|i| i.cluster_id.clone())),
+            proof_complete: Set(false),
+            identity: Set(identity.as_ref().map(encode).transpose()?),
+            runtime: Set(None),
+            proof: Set(None),
+            proof_nonce: Set(None),
+            proof_until: Set(None),
             id: Set(id.into()),
             sequence: Set(0),
             closed: Set(false),
@@ -85,6 +101,13 @@ impl Repository {
         if row.closed {
             return Err(conflict("gateway incarnation was permanently retired"));
         }
+        if row.identity != identity.as_ref().map(encode).transpose()? {
+            return Err(conflict("gateway incarnation identity changed"));
+        }
+        let attributed = row.identity.is_some() && row.runtime.is_some();
+        let attribution_required =
+            std::env::var("XSCOPE_REQUIRE_GATEWAY_IDENTITY").as_deref() == Ok("true");
+        let identity_ready = attributed || (!attribution_required && row.identity.is_none());
         let sequence = row
             .sequence
             .checked_add(1)
@@ -103,6 +126,17 @@ impl Repository {
         ));
         active.delivered_at = Set(time);
         active.update(&tx).await?;
+        let mut entropy = [0u8; 32];
+        getrandom::fill(&mut entropy).map_err(|_| invalid("traffic entropy unavailable"))?;
+        let admission_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(entropy);
+        xscope_entities::traffic_grant::Entity::delete_many()
+            .filter(xscope_entities::traffic_grant::Column::SessionId.eq(id))
+            .filter(
+                xscope_entities::traffic_grant::Column::ExpiresAt
+                    .lt(time - chrono::Duration::minutes(2)),
+            )
+            .exec(&tx)
+            .await?;
         let clusters = cluster::Entity::find().all(&tx).await?;
         let mut controls = Vec::new();
         for pool in pools {
@@ -110,9 +144,16 @@ impl Repository {
                 c.id == pool.cluster_id
                     && c.revoked_at.is_none()
                     && c.expires_at > time
-                    && c.acknowledged_version >= pool.scale_operation.as_ref().filter(|op|op["up"]==true).and_then(|op|op["previous_version"].as_i64()).unwrap_or(pool.desired_version)
+                    && c.acknowledged_version
+                        >= pool
+                            .scale_operation
+                            .as_ref()
+                            .filter(|op| op["up"] == true)
+                            .and_then(|op| op["previous_version"].as_i64())
+                            .unwrap_or(pool.desired_version)
             });
             let accepting = pool.state == "active"
+                && identity_ready
                 && identity_valid
                 && pool.ready_until.is_some_and(|until| until > time);
             let previous = view::Entity::find_by_id((pool.id.clone(), id.to_owned()))
@@ -143,8 +184,22 @@ impl Repository {
                 accepting,
             });
         }
+        let pools: std::collections::BTreeMap<_, _> = controls
+            .iter()
+            .filter(|p| p.accepting)
+            .map(|p| (p.id.clone(), p.generation))
+            .collect();
+        xscope_entities::traffic_grant::ActiveModel {
+            token_hash: Set(format!("{:x}", Sha256::digest(admission_token.as_bytes()))),
+            session_id: Set(id.into()),
+            expires_at: Set(time + chrono::Duration::seconds(LEASE_SECONDS as i64)),
+            pools: Set(encode(&pools)?),
+        }
+        .insert(&tx)
+        .await?;
         tx.commit().await?;
         snapshot.traffic = Some(TrafficSnapshot {
+            admission_token,
             session_id: id.into(),
             sequence,
             nonce,
@@ -154,6 +209,65 @@ impl Repository {
         Ok(snapshot)
     }
 
+    pub async fn authorize_serving(&self, headers: &axum::http::HeaderMap) -> ServiceResult<()> {
+        let get = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .ok_or(ServiceError::Forbidden)
+        };
+        let session_id = get("x-xscope-traffic-session")?;
+        let token = get("x-xscope-traffic-token")?;
+        let pool_id = get("x-xscope-managed-pool")?;
+        if token.len() != 43 || uuid::Uuid::parse_str(session_id).is_err() {
+            return Err(ServiceError::Forbidden);
+        }
+        let grant = xscope_entities::traffic_grant::Entity::find_by_id(format!(
+            "{:x}",
+            Sha256::digest(token.as_bytes())
+        ))
+        .one(&self.db)
+        .await?
+        .ok_or(ServiceError::Forbidden)?;
+        if grant.session_id != session_id || grant.expires_at <= chrono::Utc::now().fixed_offset() {
+            return Err(ServiceError::Forbidden);
+        }
+        let session = session::Entity::find_by_id(session_id)
+            .one(&self.db)
+            .await?
+            .ok_or(ServiceError::Forbidden)?;
+        if session.closed || (session.identity.is_some() && session.runtime.is_none()) {
+            return Err(ServiceError::Forbidden);
+        }
+        let pool = pool::Entity::find_by_id(pool_id)
+            .one(&self.db)
+            .await?
+            .ok_or(ServiceError::Forbidden)?;
+        if grant.pools.get(pool_id).and_then(|v| v.as_i64()) != Some(pool.generation) {
+            return Err(ServiceError::Forbidden);
+        }
+        if pool.state != "active"
+            || pool
+                .ready_until
+                .is_none_or(|t| t <= chrono::Utc::now().fixed_offset())
+        {
+            return Err(ServiceError::Forbidden);
+        }
+        let identity = cluster::Entity::find_by_id(&pool.cluster_id)
+            .one(&self.db)
+            .await?
+            .ok_or(ServiceError::Forbidden)?;
+        if identity.revoked_at.is_some() || identity.expires_at <= chrono::Utc::now().fixed_offset()
+        {
+            return Err(ServiceError::Forbidden);
+        }
+        if std::env::var("XSCOPE_REQUIRE_GATEWAY_IDENTITY").as_deref() == Ok("true")
+            && session.runtime.is_none()
+        {
+            return Err(ServiceError::Forbidden);
+        }
+        Ok(())
+    }
     pub async fn traffic_report(&self, report: TrafficReport) -> ServiceResult<serde_json::Value> {
         if uuid::Uuid::parse_str(&report.session_id).is_err()
             || report.sequence <= 0
@@ -175,6 +289,13 @@ impl Repository {
             return Err(conflict("stale gateway ACK"));
         }
         let payload = encode(&report)?;
+        if row.closed {
+            if report.closed && row.reported.as_ref() == Some(&payload) {
+                tx.commit().await?;
+                return Ok(json!({"duplicate":true}));
+            }
+            return Err(conflict("retired gateway cannot publish a late ACK"));
+        }
         if let Some(previous) = &row.reported {
             if previous != &payload {
                 return Err(conflict("ACK sequence is bound to a different report"));

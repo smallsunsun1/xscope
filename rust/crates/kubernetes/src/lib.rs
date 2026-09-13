@@ -1,10 +1,11 @@
 pub mod api;
 pub mod autoscaling;
 pub mod controller;
+pub mod gateway_proof;
 pub mod observation;
 pub mod pool;
-pub mod resources;
 pub mod recommendation;
+pub mod resources;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

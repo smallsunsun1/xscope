@@ -219,6 +219,7 @@ impl DynamicKeySet {
         internal_url: String,
         internal_token: String,
         interval: Duration,
+        identity: Option<xscope_domain::traffic::GatewayIdentity>,
     ) {
         if internal_url.is_empty() || internal_token.is_empty() {
             return;
@@ -249,16 +250,17 @@ impl DynamicKeySet {
             loop {
                 let final_report = keys.stopping.load(Ordering::Acquire);
                 let fetched_at = Instant::now();
-                let refresh = fetch_snapshot(&client, &url, &internal_token).and_then(|snapshot| {
-                    let traffic = snapshot.traffic.clone();
-                    let validated = KeySet::from_snapshot(snapshot)?;
-                    if let Some(grant) = traffic {
-                        keys.traffic
-                            .install(grant, fetched_at)
-                            .map_err(|_| SnapshotError::InvalidTraffic)?;
-                    }
-                    Ok(validated)
-                });
+                let refresh = fetch_snapshot(&client, &url, &internal_token, identity.as_ref())
+                    .and_then(|snapshot| {
+                        let traffic = snapshot.traffic.clone();
+                        let validated = KeySet::from_snapshot(snapshot)?;
+                        if let Some(grant) = traffic {
+                            keys.traffic
+                                .install(grant, fetched_at)
+                                .map_err(|_| SnapshotError::InvalidTraffic)?;
+                        }
+                        Ok(validated)
+                    });
                 match refresh {
                     Ok(snapshot) => {
                         let count = snapshot.0.len();
@@ -312,7 +314,15 @@ fn fetch_snapshot(
     client: &reqwest::blocking::Client,
     url: &str,
     token: &str,
+    identity: Option<&xscope_domain::traffic::GatewayIdentity>,
 ) -> Result<GatewaySnapshot, SnapshotError> {
+    let mut url = reqwest::Url::parse(url).map_err(|_| SnapshotError::InvalidTraffic)?;
+    if let Some(identity) = identity {
+        url.query_pairs_mut().append_pair(
+            "identity",
+            &serde_json::to_string(identity).map_err(|_| SnapshotError::InvalidTraffic)?,
+        );
+    }
     Ok(client
         .get(url)
         .bearer_auth(token)

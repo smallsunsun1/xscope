@@ -61,6 +61,10 @@ kubectl -n xscope-system rollout status deployment/grafana --timeout=180s
 kubectl -n xscope-system rollout status deployment/keycloak --timeout=300s
 kubectl -n xscope-system rollout status deployment/control-plane --timeout=180s
 kubectl -n xscope-system rollout status deployment/cluster-agent --timeout=180s
+if kubectl -n xscope-system get deployment/xscope-member-agent >/dev/null 2>&1; then
+  kubectl -n xscope-system rollout restart deployment/xscope-member-agent
+  kubectl -n xscope-system rollout status deployment/xscope-member-agent --timeout=180s
+fi
 kubectl -n xscope-system rollout status deployment/inference-serving --timeout=180s
 kubectl -n xscope-system rollout status deployment/gateway --timeout=180s
 kubectl -n xscope-system rollout status deployment/runtime --timeout=180s

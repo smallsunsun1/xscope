@@ -1,5 +1,7 @@
 # XScope
 
+本地自动缩容增量已部署：受管 v2 入口通过真实 KEDA 升降副本、SSE 排空和 Gateway 容器终止证明验证；保留原入口和历史数据。配置、边界与 Bazel 运维入口见 [自动缩容与终止证明](docs/safe-autoscaling.md)。演示使用 Echo，不是 GPU 模型；节点失联等缺证据情况仍保持阻塞。
+
 2026-09-12 开发增量：新增 [受管 Pool 自动注册、Gateway ACK、排空和 UID 手动缩容](docs/managed-traffic.md)，只适用于独占受管入口。代码尚未部署，不将离线视为零在途，也未开启 KEDA 自动缩容。
 
 2026-09-11 开发增量：新增数据库模型目录与不可变价格版本、Gateway 请求体多模型路由、发布暂停/提升/历史回滚，以及 Runtime 可配置启动就绪探针。接口和测试见 [模型目录与发布](docs/model-catalog.md)。本次代码尚未部署，自动注册与安全排空等剩余规划不视为完成。
@@ -96,6 +98,8 @@ kubectl -n xscope-system create secret generic xscope-gateway-keys \
 ```
 
 ### Docker Desktop 一键部署
+
+已安装环境的最新[可靠性与运维扩展](docs/reliability-operations.md)提供有界计费并发、每日业务快照、隔离恢复、站内告警和“运行与恢复”页面；该文档包含保留 live 配置的定向增量升级命令及生产边界。
 
 本地 overlay 会把管理面和数据面共同部署到当前 `kubectl` context，常驻 CPU request
 约为 175m（不包含用户创建的模型工作负载）。控制台由 OAuth2 Proxy 保护，账号由

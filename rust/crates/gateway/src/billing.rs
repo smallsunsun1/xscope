@@ -1,11 +1,11 @@
 //! The control plane owns durable holds. Recovery may release an
 //! undispatched hold, but can NEVER grant permission to replay inference.
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ use crate::delivery::Permit;
 pub struct BillingAdmission {
     sender: SyncSender<Command>,
     healthy: Arc<AtomicBool>,
+    timeout: Duration,
     pub context_tokens: i64,
     pub price_version: String,
 }
@@ -38,6 +39,62 @@ struct Command {
     _permit: Arc<Permit>,
     intent: Intent,
     reply: oneshot::Sender<Result<(), u16>>,
+    queued: Instant,
+    deadline: Instant,
+    _slot: AdmissionSlot,
+}
+
+// RAII also covers failed try_send, cancellation and worker unwinding.
+struct AdmissionSlot;
+impl Drop for AdmissionSlot {
+    fn drop(&mut self) {
+        xscope_telemetry::admission_change("occupied", -1);
+    }
+}
+struct ActiveAdmission;
+impl Drop for ActiveAdmission {
+    fn drop(&mut self) {
+        xscope_telemetry::admission_change("active", -1);
+    }
+}
+struct WorkerHealth(Arc<AtomicBool>);
+impl Drop for WorkerHealth {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Settings {
+    pub workers: usize,
+    pub capacity: usize,
+    pub timeout: Duration,
+}
+
+impl Settings {
+    pub fn from_env() -> io::Result<Self> {
+        Self::parse(|name| std::env::var(name).ok())
+    }
+
+    fn parse(get: impl Fn(&str) -> Option<String>) -> io::Result<Self> {
+        let number = |name, fallback: usize, min, max| {
+            get(name)
+                .map_or(Ok(fallback), |raw| raw.parse::<usize>())
+                .ok()
+                .filter(|v| (min..=max).contains(v))
+                .ok_or_else(|| io::Error::other(format!("invalid {name}")))
+        };
+        Ok(Self {
+            workers: number("XSCOPE_BILLING_ADMISSION_WORKERS", 4, 1, 32)?,
+            capacity: number("XSCOPE_BILLING_ADMISSION_CAPACITY", 64, 1, 4096)?,
+            timeout: Duration::from_millis(number(
+                "XSCOPE_BILLING_ADMISSION_TIMEOUT_MS",
+                8000,
+                100,
+                60000,
+            )? as u64),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -67,7 +124,8 @@ impl BillingAdmission {
         context_tokens: i64,
         price_version: String,
     ) -> io::Result<Self> {
-        let protocol = Protocol {
+        let settings = Settings::from_env()?;
+        let protocol = Arc::new(Protocol {
             client: Client::builder()
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(3))
@@ -76,34 +134,67 @@ impl BillingAdmission {
                 .map_err(|_| io::Error::other("admission HTTP client initialization failed"))?,
             base: base.trim_end_matches('/').into(),
             token,
-        };
-        let healthy = Arc::new(AtomicBool::new(true));
-        let health = healthy.clone();
-        let (sender, receiver) = mpsc::sync_channel::<Command>(64);
-        thread::spawn(move || {
-            while let Ok(command) = receiver.recv() {
-                if command.reply.is_closed() {
-                    continue;
-                }
-                let decision = protocol.admit(&command);
-                let ambiguous = matches!(decision, Decision::Uncertain(_));
-                let result = match decision {
-                    Decision::Dispatched => Ok(()),
-                    Decision::Rejected(status) | Decision::Uncertain(status) => Err(status),
-                };
-                // A cancelled caller cannot forward. Never dispatch from recovery.
-                let abandoned = command.reply.send(result).is_err();
-                if (ambiguous || abandoned) && protocol.recover(&command.intent).is_err() {
-                    tracing::warn!(reservation_id = %command.intent.request.id,
-                        "admission outcome unknown; inspect central pending reservations");
-                    xscope_telemetry::background_event("billing_recover", "central_pending");
-                }
-            }
-            health.store(false, Ordering::Release);
         });
+        let healthy = Arc::new(AtomicBool::new(true));
+        let (sender, receiver) = mpsc::sync_channel::<Command>(settings.capacity);
+        let receiver = Arc::new(Mutex::new(receiver));
+        xscope_telemetry::admission_limits(settings.workers, settings.capacity);
+        for _ in 0..settings.workers {
+            let (receiver, protocol, health) =
+                (receiver.clone(), protocol.clone(), healthy.clone());
+            thread::Builder::new()
+                .name("billing-admission".into())
+                .spawn(move || {
+                    let _health = WorkerHealth(health);
+                    loop {
+                        // Lock only the dequeue, never an HTTP request or recovery.
+                        let command = match receiver.lock() {
+                            Ok(receiver) => receiver.recv(),
+                            Err(_) => break,
+                        };
+                        let Ok(command) = command else { break };
+                        xscope_telemetry::admission_duration(
+                            "queue",
+                            command.queued.elapsed().as_secs_f64(),
+                        );
+                        if command.reply.is_closed() || Instant::now() >= command.deadline {
+                            xscope_telemetry::background_event(
+                                "billing_admit",
+                                "expired_before_reserve",
+                            );
+                            continue;
+                        }
+                        xscope_telemetry::admission_change("active", 1);
+                        let _active = ActiveAdmission;
+                        let start = Instant::now();
+                        let decision = protocol.admit(&command);
+                        xscope_telemetry::admission_duration(
+                            "protocol",
+                            start.elapsed().as_secs_f64(),
+                        );
+                        let ambiguous = matches!(decision, Decision::Uncertain(_));
+                        let result = match decision {
+                            Decision::Dispatched => Ok(()),
+                            Decision::Rejected(status) | Decision::Uncertain(status) => Err(status),
+                        };
+                        // A cancelled caller cannot forward. Never dispatch from recovery.
+                        let abandoned = command.reply.send(result).is_err();
+                        if (ambiguous || abandoned) && protocol.recover(&command.intent).is_err() {
+                            tracing::warn!(reservation_id = %command.intent.request.id,
+                            "admission outcome unknown; inspect central pending reservations");
+                            xscope_telemetry::background_event(
+                                "billing_recover",
+                                "central_pending",
+                            );
+                        }
+                    }
+                })
+                .map_err(|_| io::Error::other("admission worker initialization failed"))?;
+        }
         Ok(Self {
             sender,
             healthy,
+            timeout: settings.timeout,
             context_tokens,
             price_version,
         })
@@ -130,6 +221,8 @@ impl BillingAdmission {
             output_token_limit: request.output_token_limit,
         };
         let (reply, receive) = oneshot::channel();
+        let queued = Instant::now();
+        xscope_telemetry::admission_change("occupied", 1);
         self.sender
             .try_send(Command {
                 _permit: permit,
@@ -138,11 +231,20 @@ impl BillingAdmission {
                     trace_headers,
                 },
                 reply,
+                queued,
+                deadline: queued + self.timeout,
+                _slot: AdmissionSlot,
             })
-            .map_err(|_| 503_u16)?;
-        tokio::time::timeout(Duration::from_secs(8), receive)
+            .map_err(|_| {
+                xscope_telemetry::background_event("billing_admit", "queue_rejected");
+                503_u16
+            })?;
+        tokio::time::timeout(self.timeout, receive)
             .await
-            .map_err(|_| 503_u16)?
+            .map_err(|_| {
+                xscope_telemetry::background_event("billing_admit", "deadline_exceeded");
+                503_u16
+            })?
             .map_err(|_| 503_u16)??;
         Ok(ticket)
     }
@@ -186,7 +288,7 @@ impl Protocol {
         if reservation.state != "reserved" {
             return Decision::Uncertain(503);
         }
-        if command.reply.is_closed() {
+        if command.reply.is_closed() || Instant::now() >= command.deadline {
             return Decision::Uncertain(503);
         }
         match self.transition(intent, "dispatch") {
@@ -224,4 +326,27 @@ fn decode(response: reqwest::blocking::Response) -> Result<Reservation, u16> {
         return Err(response.status().as_u16());
     }
     response.json().map_err(|_| 503)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    #[test]
+    fn concurrency_settings_are_bounded_and_invalid_values_fail_closed() {
+        let defaults = Settings::parse(|_| None).unwrap();
+        assert_eq!((defaults.workers, defaults.capacity), (4, 64));
+        for (key, value) in [
+            ("WORKERS", "0"),
+            ("WORKERS", "33"),
+            ("CAPACITY", "4097"),
+            ("TIMEOUT_MS", "-1"),
+        ] {
+            assert!(
+                Settings::parse(|name| (name == format!("XSCOPE_BILLING_ADMISSION_{key}"))
+                    .then(|| value.into()))
+                .is_err()
+            );
+        }
+    }
 }

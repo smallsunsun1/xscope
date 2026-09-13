@@ -236,8 +236,13 @@ pub fn validate(model: &mut ModelDeployment) -> Result<(), Error> {
         return Err(Error::Invalid("runtime health requires a local HTTP path and startup timeout 10..7200 seconds in multiples of five".into()));
     }
     if let Some(scaling) = &spec.autoscaling {
-        if scaling.managed && (spec.serving.is_none() || (scaling.target_pending_requests==0 && scaling.target_running_requests==0)) {
-            return Err(Error::Invalid("managed scaling requires a serving pool and EPP request metrics".into()));
+        if scaling.managed
+            && (spec.serving.is_none()
+                || (scaling.target_pending_requests == 0 && scaling.target_running_requests == 0))
+        {
+            return Err(Error::Invalid(
+                "managed scaling requires a serving pool and EPP request metrics".into(),
+            ));
         }
         if scaling.min_replicas < 1
             || scaling.max_replicas < scaling.min_replicas

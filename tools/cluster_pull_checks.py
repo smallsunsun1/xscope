@@ -12,6 +12,28 @@ def verify(api, binary, root, private_port, port, eventually):
     status, registration = api("POST", "/clusters", {"id": name, "namespace": "synthetic-member", "credential_days": 1}, internal=False)
     assert status == 201
     state = {"model": None, "lease": None}
+    network = {"blocked": True, "rejections": 0}
+    class ControlLink(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.do_POST()
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if network["blocked"]:
+                network["rejections"] += 1
+                status, payload = 503, b'{}'
+            else:
+                req = urllib.request.Request(f"http://127.0.0.1:{private_port}" + self.path,
+                    method=self.command, data=body if self.command != "GET" else None, headers={"Content-Type": "application/json", "Authorization": self.headers.get("Authorization", "")})
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        status, payload = response.status, response.read()
+                except urllib.error.HTTPError as error:
+                    status, payload = error.code, error.read()
+            self.send_response(status); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
+        def log_message(self, *args): pass
+    link = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ControlLink)
+    threading.Thread(target=link.serve_forever, daemon=True).start()
     class Kubernetes(http.server.BaseHTTPRequestHandler):
         def reply(self, value, code=200):
             data = json.dumps(value).encode()
@@ -50,6 +72,13 @@ def verify(api, binary, root, private_port, port, eventually):
             value = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state["lease"]["spec"].update(value.get("spec", {}))
             self.reply(state["lease"])
+        def do_PUT(self):
+            value = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            assert value["metadata"]["uid"] == "synthetic-uid"
+            assert value["metadata"]["resourceVersion"] == state["model"]["metadata"]["resourceVersion"]
+            value["metadata"]["resourceVersion"] = str(int(value["metadata"]["resourceVersion"]) + 1)
+            state["model"] = value
+            self.reply(value)
         def log_message(self, *args):
             pass
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Kubernetes)
@@ -62,7 +91,7 @@ def verify(api, binary, root, private_port, port, eventually):
         "contexts": [{"name": "synthetic", "context": {"cluster": "synthetic", "user": "synthetic"}}],
         "users": [{"name": "synthetic", "user": {}}]}
     for path, value in ((credential, registration["credential"]), (kubeconfig, json.dumps(fixture)), (config, json.dumps({"cluster_id": name,
-        "namespace": "synthetic-member", "control_url": f"http://127.0.0.1:{private_port}", "credential_file": str(credential), "allow_local_http": True}))):
+        "namespace": "synthetic-member", "control_url": f"http://127.0.0.1:{link.server_port}", "credential_file": str(credential), "allow_local_http": True}))):
         path.write_text(value)
         os.chmod(path, 0o600)
     model = {"model": {"id": "demo", "revision": "v1", "uri": "s3://example/demo", "checksum": "sha256:" + "a" * 64},
@@ -75,18 +104,33 @@ def verify(api, binary, root, private_port, port, eventually):
         with (root / "member-agent.log").open("wb") as log:
             process = subprocess.Popen([binary], env=env, stdout=log, stderr=log)
             try:
+                cluster = lambda: next(row for row in api("GET", "/clusters", internal=False)[1]["data"] if row["id"] == name)
+                eventually(lambda: network["rejections"] > 0)
+                assert cluster()["acknowledged_version"] == 0 and state["model"] is None
+                network["blocked"] = False
                 eventually(lambda: next(row for row in api("GET", "/clusters", internal=False)[1]["data"] if row["id"] == name)["acknowledged_version"] == 1)
                 assert state["model"]["spec"]["replicas"] == 0
+                network["blocked"] = True
+                rejected = network["rejections"]
+                updated = {**model, "replicas": 1}
+                assert api("PUT", f"/clusters/{name}/desired-state", {"expected_version": 1, "deployments": [{"name": "synthetic-model", "spec": updated, "delete_uid": None}]}, internal=False)[0] == 200
+                eventually(lambda: network["rejections"] > rejected)
+                assert cluster()["acknowledged_version"] == 1 and state["model"]["spec"]["replicas"] == 0
+                network["blocked"] = False
+                eventually(lambda: cluster()["acknowledged_version"] == 2)
+                assert state["model"]["spec"]["replicas"] == 1
                 # Outbound mode has no second inbound CRUD writer.
                 try:
                     urllib.request.urlopen(f"http://127.0.0.1:{address}/v1/model-deployments", timeout=3)
                     raise AssertionError("legacy writer exposed in outbound mode")
                 except urllib.error.HTTPError as error:
                     assert error.code == 404
-                print("PASS real outbound Agent: private projected config, kube-rs HTTP apply, durable ACK, no inbound mutation route; Kubernetes server is a fixture, not a second real cluster", flush=True)
+                print("PASS outbound Agent link partition/recovery: unapplied revision never ACKed, old desired state retained during outage, UID/RV update on reconnect; Kubernetes remains a fixture, not a second real cluster", flush=True)
             finally:
                 process.kill()
                 process.wait(timeout=5)
     finally:
         server.shutdown()
         server.server_close()
+        link.shutdown()
+        link.server_close()

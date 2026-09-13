@@ -15,6 +15,18 @@ def managed_profile(source):
         "@type": "type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC", "rules": {"action": "ALLOW", "policies": {
             "managed_gateway": {"permissions": [{"header": {"name": "x-xscope-managed-pool", "string_match": {"prefix": "managed-"}}}],
                 "principals": [{"any": True}]}}}}})
+    manager["http_filters"].insert(1, {"name": "envoy.filters.http.ext_authz", "typed_config": {
+        "@type": "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz",
+        "failure_mode_allow": False, "clear_route_cache": False,
+        "allowed_headers": {"patterns": [{"prefix": "x-xscope-"}]},
+        "http_service": {"server_uri": {"uri": "http://control-plane:8084", "cluster": "traffic_authority", "timeout": "3s"},
+            "path_prefix": "/internal/v1/traffic/authorize"}}})
+    manager["http_filters"].insert(2, {"name": "envoy.filters.http.header_mutation", "typed_config": {
+        "@type": "type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation",
+        "mutations": {"request_mutations": [{"remove": "x-xscope-traffic-token"}, {"remove": "x-xscope-traffic-session"}]}}})
+    config["static_resources"].setdefault("clusters", []).append({"name": "traffic_authority", "type": "STRICT_DNS", "connect_timeout": "2s",
+        "load_assignment": {"cluster_name": "traffic_authority", "endpoints": [{"lb_endpoints": [{"endpoint": {"address": {
+            "socket_address": {"address": "control-plane", "port_value": 8084}}}}]}]}})
     for host in manager["route_config"]["virtual_hosts"]:
         for route in host["routes"]:
             if "route" not in route:

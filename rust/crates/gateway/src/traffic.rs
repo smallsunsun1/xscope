@@ -124,6 +124,17 @@ impl Traffic {
             active: state.active.clone(),
         })
     }
+    pub fn admission_headers(&self) -> Option<(String, String)> {
+        let state = self.state.lock().ok()?;
+        if state.closed || state.deadline.is_none_or(|v| v <= Instant::now()) {
+            return None;
+        }
+        let snapshot = state.snapshot.as_ref()?;
+        if snapshot.admission_token.is_empty() {
+            return None;
+        }
+        Some((self.session_id.clone(), snapshot.admission_token.clone()))
+    }
     pub fn close(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
@@ -138,6 +149,7 @@ mod tests {
     use xscope_domain::traffic::PoolControl;
     fn snapshot(t: &Traffic, sequence: i64, generation: i64, accepting: bool) -> TrafficSnapshot {
         TrafficSnapshot {
+            admission_token: String::new(),
             session_id: t.session_id.clone(),
             sequence,
             nonce: uuid::Uuid::now_v7().to_string(),

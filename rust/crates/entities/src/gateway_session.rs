@@ -16,6 +16,8 @@ pub struct Model {
     pub proof: Option<Json>,
     pub proof_nonce: Option<String>,
     pub proof_until: Option<DateTimeWithTimeZone>,
+    pub gateway_cluster_id: Option<String>,
+    pub proof_complete: bool,
 }
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}

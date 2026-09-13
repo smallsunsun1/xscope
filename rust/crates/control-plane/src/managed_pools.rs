@@ -51,6 +51,9 @@ impl Repository {
                 "invalid cluster, deployment or serving Service name",
             ));
         }
+        if !(1..=2).contains(&request.traffic_protocol) {
+            return Err(invalid("unknown traffic protocol"));
+        }
         let tx = self.db.begin().await?;
         registry_lock(&tx).await?;
         let cluster = cluster::Entity::find_by_id(&request.cluster_id)
@@ -86,6 +89,11 @@ impl Repository {
         let model = spec["model"]["id"]
             .as_str()
             .ok_or_else(|| invalid("model ID missing"))?;
+        if spec["autoscaling"]["managed"] == true && request.traffic_protocol != 2 {
+            return Err(invalid(
+                "automatic scaling requires a v2 fenced serving entry",
+            ));
+        }
         crate::catalog::active_model(&tx, model).await?;
         let id = format!("managed-{}", uuid::Uuid::now_v7());
         let endpoint = ServingEndpoint {
@@ -129,6 +137,7 @@ impl Repository {
         }
         pool::ActiveModel {
             scale_operation: Set(None),
+            idle_requested_after: Set(None),
             id: Set(id.clone()),
             cluster_id: Set(cluster.id),
             deployment: Set(request.deployment.clone()),
@@ -174,16 +183,18 @@ impl Repository {
         let blocked = participants
             .iter()
             .filter(|v| {
-                !v.retired && (v.acknowledged_generation < row.generation || v.active_requests != 0)
+                v.active_requests != 0 || (!v.retired && v.acknowledged_generation < row.generation)
             })
             .count();
         Ok(
             json!({"id":row.id,"cluster_id":row.cluster_id,"deployment":row.deployment,"generation":row.generation,
             "state":row.state,"observed_at":row.observed_at,"observation_code":row.observation_code,
             "ready_until":row.ready_until,"deployment_uid":row.deployment_uid,"desired_version":row.desired_version,
+            "scale_operation":row.scale_operation,"desired_replicas":row.expected_spec.get("replicas"),
+            "idle_requested_after":row.idle_requested_after,
             "participants":participants.iter().map(|v| json!({"session_id":v.session_id,"acknowledged_generation":v.acknowledged_generation,
                 "active_requests":v.active_requests,"reported_at":v.reported_at,"retired":v.retired})).collect::<Vec<_>>(),
-            "blocked_participants":blocked,"can_finish_drain":row.state=="draining" && blocked==0}),
+            "blocked_participants":blocked,"can_finish_drain":row.state=="draining" && blocked==0 && row.scale_operation.is_none()}),
         )
     }
 
@@ -203,7 +214,9 @@ impl Repository {
         if row.generation != expected {
             return Err(conflict("pool generation changed"));
         }
-        if row.scale_operation.is_some() { return Err(conflict("automatic scaling operation is in progress")); }
+        if row.scale_operation.is_some() {
+            return Err(conflict("automatic scaling operation is in progress"));
+        }
         let time = now(&tx).await?;
         let state = match action {
             "drain" if matches!(row.state.as_str(), "active" | "pending") => "draining",
@@ -213,8 +226,8 @@ impl Repository {
                     .all(&tx)
                     .await?;
                 if views.iter().any(|v| {
-                    !v.retired
-                        && (v.acknowledged_generation < row.generation || v.active_requests != 0)
+                    v.active_requests != 0
+                        || (!v.retired && v.acknowledged_generation < row.generation)
                 }) {
                     return Err(conflict(
                         "gateway ACK or in-flight completion is missing; offline is not drained",
@@ -279,8 +292,10 @@ impl Repository {
             }
             let binding: PoolBinding = decode(row.binding.clone())?;
             let nonce = uuid::Uuid::now_v7().to_string();
+            let idle_after = crate::gateway_proofs::idle_after(&tx, &row.id).await?;
             tasks.push(ObservationTask {
-                idle_after: crate::gateway_proofs::idle_after(&tx, &row.id).await?,
+                traffic_protocol: binding.traffic_protocol,
+                idle_after: idle_after.clone(),
                 pool_id: row.id.clone(),
                 generation: row.generation,
                 nonce: nonce.clone(),
@@ -291,6 +306,7 @@ impl Repository {
                 expected_spec: row.expected_spec.clone(),
             });
             let mut active: pool::ActiveModel = row.into();
+            active.idle_requested_after = Set(idle_after);
             active.observation_nonce = Set(Some(nonce));
             active.observation_until = Set(Some(time + chrono::Duration::seconds(60)));
             active.update(&tx).await?;
@@ -333,6 +349,15 @@ impl Repository {
             || cluster.acknowledged_version < row.desired_version
         {
             return Err(conflict("stale observation generation or lease"));
+        }
+        if report.idle
+            && (report.idle_after.is_none()
+                || report.idle_after != row.idle_requested_after
+                || report.idle_after != crate::gateway_proofs::idle_after(&tx, &row.id).await?)
+        {
+            return Err(conflict(
+                "provider idle proof predates the termination fence",
+            ));
         }
         if report.deployment_uid.is_some()
             && row
@@ -395,9 +420,19 @@ impl Repository {
         }
         // Readiness observations NEVER reopen a draining/drained pool.
         active.updated_at = Set(time);
-        let updated=active.update(&tx).await?;
-        if report.idle { crate::gateway_proofs::confirm_idle(&tx,&updated).await?; }
-        let changed=crate::scaling::reconcile(&tx,&cluster,&updated, report.scaling, report.applied_replicas, report.ready).await?;
+        let updated = active.update(&tx).await?;
+        if report.idle {
+            crate::gateway_proofs::confirm_idle(&tx, &updated).await?;
+        }
+        let changed = crate::scaling::reconcile(
+            &tx,
+            &cluster,
+            &updated,
+            report.scaling,
+            report.applied_replicas,
+            report.ready,
+        )
+        .await?;
         tx.commit().await?;
         Ok(json!({"accepted":true,"replicas_changed":changed}))
     }
@@ -438,7 +473,11 @@ pub(crate) async fn guard_desired(
                 "managed deployment must finish pool drain before mutation",
             ));
         }
-        if row.scale_operation.is_some() { return Err(conflict("automatic scaling owns the pending replica change")); }
+        if row.scale_operation.is_some() {
+            return Err(conflict(
+                "automatic scaling owns the pending replica change",
+            ));
+        }
         let uid = row
             .deployment_uid
             .clone()

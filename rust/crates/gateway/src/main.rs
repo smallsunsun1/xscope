@@ -39,6 +39,7 @@ fn run() -> Result<()> {
         settings.control_internal_url.clone(),
         settings.internal_token.clone(),
         Duration::from_secs(settings.policy_refresh_seconds),
+        settings.gateway_identity.clone(),
     );
     let quota = QuotaManager::new(&settings.redis_url);
     if quota.is_distributed() {

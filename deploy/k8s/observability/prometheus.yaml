@@ -34,9 +34,13 @@ scrape_configs:
       - role: pod
         namespaces: { names: [xscope-system] }
     relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_container_port_name]
-        regex: inference-serving(-canary)?;health
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component, __meta_kubernetes_pod_container_port_name]
+        regex: inference-routing;health
         action: keep
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        target_label: service
       - source_labels: [__meta_kubernetes_pod_name]
         target_label: pod
       - target_label: cluster
@@ -46,8 +50,8 @@ scrape_configs:
       - role: pod
         namespaces: { names: [xscope-system] }
     relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_container_port_name]
-        regex: inference-serving(-canary)?;epp
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component, __meta_kubernetes_pod_container_port_name]
+        regex: inference-routing;epp
         action: keep
       - source_labels: [__meta_kubernetes_pod_ip]
         target_label: __address__

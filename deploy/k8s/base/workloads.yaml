@@ -86,10 +86,11 @@ spec:
     matchLabels: { app.kubernetes.io/name: gateway }
   template:
     metadata:
-      labels: { app.kubernetes.io/name: gateway, app.kubernetes.io/part-of: xscope }
+      labels: { app.kubernetes.io/name: gateway, app.kubernetes.io/component: api-gateway, app.kubernetes.io/part-of: xscope }
     spec:
       # Default: 20s request grace + up to 10s runtime shutdown + 10s outbox drain.
       terminationGracePeriodSeconds: 60
+      automountServiceAccountToken: false
       securityContext: { fsGroup: 65532 }
       containers:
         - name: gateway
@@ -97,6 +98,14 @@ spec:
           imagePullPolicy: IfNotPresent
           envFrom: [{ configMapRef: { name: xscope-config } }]
           env:
+            - name: XSCOPE_GATEWAY_CLUSTER_ID
+              valueFrom: { secretKeyRef: { name: xscope-member-runtime, key: cluster-id, optional: true } }
+            - name: XSCOPE_POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: XSCOPE_POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+            - name: XSCOPE_POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             - name: XSCOPE_API_KEYS_JSON
               valueFrom:
                 secretKeyRef:

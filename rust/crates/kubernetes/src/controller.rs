@@ -211,8 +211,17 @@ async fn reconcile_inner(model: &ModelDeployment, context: &Context) -> Result<A
         .join(",");
     // Create the recommendation before KEDA references it. Never copy its
     // spec.replicas into the Runtime here; the control plane owns that decision.
-    crate::recommendation::sync(context.client.clone(), model,
-        existing.as_ref().and_then(|d|d.spec.as_ref()).and_then(|s|s.replicas).unwrap_or(model.spec.replicas), &selector).await?;
+    crate::recommendation::sync(
+        context.client.clone(),
+        model,
+        existing
+            .as_ref()
+            .and_then(|d| d.spec.as_ref())
+            .and_then(|s| s.replicas)
+            .unwrap_or(model.spec.replicas),
+        &selector,
+    )
+    .await?;
     let service_port = service
         .spec
         .as_ref()

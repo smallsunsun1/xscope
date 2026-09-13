@@ -1,5 +1,7 @@
+import { operationsMessages } from "./operations";
 // Chinese source text → English. API identifiers and user-entered content stay unchanged.
 export const messages = {
+  ...operationsMessages,
   "等待用量数据": "Awaiting usage data",
   "发布流量策略": "Publish policy",
   "请求未获授权，请重新登录": "Your session is not authorized. Sign in again.",

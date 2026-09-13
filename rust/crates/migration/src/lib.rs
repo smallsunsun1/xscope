@@ -16,7 +16,8 @@ mod m20260906_000014_loss_waivers;
 mod m20260911_000015_model_catalog;
 mod m20260911_000016_route_history;
 mod m20260912_000017_managed_traffic;
-mod m20260913_000018_safe_scaling;
+mod m20260912_000018_safe_scaling;
+mod m20260913_000019_ops_alerts;
 
 pub struct Migrator;
 
@@ -41,7 +42,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260911_000015_model_catalog::Migration),
             Box::new(m20260911_000016_route_history::Migration),
             Box::new(m20260912_000017_managed_traffic::Migration),
-            Box::new(m20260913_000018_safe_scaling::Migration),
+            Box::new(m20260912_000018_safe_scaling::Migration),
+            Box::new(m20260913_000019_ops_alerts::Migration),
         ]
     }
 }

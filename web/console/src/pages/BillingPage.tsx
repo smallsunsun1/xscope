@@ -23,6 +23,8 @@ import { api, errorMessage } from "../api";
 import { MetricCard, PageHeader, ResourceEmpty } from "../components";
 import { formatDate, formatMicrounits, formatMoney, formatNumber } from "../format";
 import { PendingReservations } from "./PendingReservations";
+import { EventWorker } from "./BillingWorkflows";
+import { ops } from "../operations";
 import type {
   BillingOrder,
   LedgerEntry,
@@ -51,6 +53,7 @@ export function BillingPage() {
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const project = projects.data?.find((item) => item.id === projectID);
   const session = useQuery({ queryKey: ["console-session"], queryFn: api.session, retry: false });
+  const capabilities = useQuery({ queryKey: ["capabilities"], queryFn: ops.capabilities, retry: false });
   const canManage = Boolean(project && session.data?.memberships?.some(item => item.tenant_id === project.tenant_id && item.role === "owner"));
   const position = useQuery({ queryKey: ["billing-position", projectID], queryFn: () => api.billingPosition(projectID), enabled: Boolean(projectID), refetchInterval: 30_000, retry: false });
   const billing = useQuery({
@@ -215,7 +218,8 @@ export function BillingPage() {
           activeKey={activeTab}
           onChange={setActiveTab}
           items={[
-            { key: "pending", label: t("待核查请求"), children: !projectID ? <ResourceEmpty title={t("先选择一个项目")} description={t("按项目查询冻结请求；仅租户 owner 可查看待核查记录。")} /> : !canManage ? <Alert className="workbench-notice" type="info" showIcon title={t("需要项目所属租户的 owner 权限")} /> : <PendingReservations key={projectID} projectID={projectID} currency={position.data?.currency ?? account.data?.currency ?? "CNY"} /> },
+            { key: "pending", label: t("待核查请求"), children: !projectID ? <ResourceEmpty title={t("先选择一个项目")} description={t("按项目查询冻结请求；仅租户 owner 可查看待核查记录。")} /> : !canManage && !capabilities.data?.billing_reviewer ? <Alert className="workbench-notice" type="info" showIcon title={t("需要项目所属租户的 owner 权限")} /> : <PendingReservations key={projectID} projectID={projectID} currency={position.data?.currency ?? account.data?.currency ?? "CNY"} /> },
+            { key: "worker", label: t("事件消费者"), children: !projectID ? <ResourceEmpty title={t("先选择一个项目")} description={t("重试不改变 ACK，也不会自动释放未知用量冻结。")} /> : !canManage ? <Alert type="info" title={t("需要项目所属租户的 owner 权限")} /> : <EventWorker key={projectID} projectID={projectID} /> },
             {
               key: "usage",
               label: t("用量汇总"),

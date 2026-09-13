@@ -22,6 +22,21 @@ fn deployment_ready(deployment: &Deployment, replicas: i32) -> bool {
         })
 }
 
+fn managed_ready(runtime: &Deployment, desired: i32, minimum: i32) -> bool {
+    runtime.metadata.deletion_timestamp.is_none()
+        && runtime
+            .spec
+            .as_ref()
+            .and_then(|s| s.replicas)
+            .is_some_and(|n| n >= minimum && n <= desired)
+        && runtime.status.as_ref().is_some_and(|s| {
+            s.observed_generation.unwrap_or(0) >= runtime.metadata.generation.unwrap_or(i64::MAX)
+                && s.ready_replicas.unwrap_or(0) >= minimum
+                && s.available_replicas.unwrap_or(0) >= minimum
+                && s.updated_replicas.unwrap_or(0) >= minimum
+        })
+}
+
 pub async fn observe(
     client: Client,
     namespace: &str,
@@ -29,6 +44,7 @@ pub async fn observe(
     task: &ObservationTask,
 ) -> PoolObservation {
     let mut report = PoolObservation {
+        idle_after: task.idle_after.clone(),
         scaling: None,
         applied_replicas: -1,
         idle: false,
@@ -39,15 +55,7 @@ pub async fn observe(
         ready: false,
         code: "kubernetes_unavailable".into(),
     };
-    match read(
-        client,
-        namespace,
-        cluster_id,
-        task,
-        &mut report,
-    )
-    .await
-    {
+    match read(client, namespace, cluster_id, task, &mut report).await {
         Ok(uid) => {
             report.ready = true;
             report.code = "ok".into();
@@ -121,14 +129,25 @@ async fn read(
         .await
         .map_err(|_| "kubernetes_unavailable")?;
     ensure_owner(&runtime, &model).map_err(|_| "identity_mismatch")?;
-    report.applied_replicas = runtime.status.as_ref().and_then(|s|s.replicas).unwrap_or(-1);
-    report.scaling = crate::recommendation::observe(client.clone(), &model, report.applied_replicas).await.unwrap_or(None);
+    report.applied_replicas = runtime
+        .status
+        .as_ref()
+        .and_then(|s| s.replicas)
+        .unwrap_or(-1);
+    report.scaling =
+        crate::recommendation::observe(client.clone(), &model, report.applied_replicas)
+            .await
+            .unwrap_or(None);
     let ready = if crate::recommendation::enabled(&model) {
-        let minimum=model.spec.autoscaling.as_ref().map_or(1,|s|s.min_replicas);
-        runtime.metadata.deletion_timestamp.is_none() && runtime.spec.as_ref().and_then(|s|s.replicas)==Some(model.spec.replicas)
-            && runtime.status.as_ref().is_some_and(|s| s.observed_generation.unwrap_or(0)>=runtime.metadata.generation.unwrap_or(i64::MAX)
-                && s.ready_replicas.unwrap_or(0)>=minimum && s.available_replicas.unwrap_or(0)>=minimum && s.updated_replicas.unwrap_or(0)>=minimum)
-    } else { deployment_ready(&runtime,model.spec.replicas) };
+        let minimum = model
+            .spec
+            .autoscaling
+            .as_ref()
+            .map_or(1, |s| s.min_replicas);
+        managed_ready(&runtime, model.spec.replicas, minimum)
+    } else {
+        deployment_ready(&runtime, model.spec.replicas)
+    };
     if !ready {
         return Err("not_ready");
     }
@@ -138,6 +157,15 @@ async fn read(
         .await
         .map_err(|_| "kubernetes_unavailable")?;
     resources::validate_picker(Some(&entry), &model).map_err(|_| "identity_mismatch")?;
+    if task.traffic_protocol >= 2
+        && entry
+            .annotations()
+            .get("platform.xscope.io/traffic-protocol")
+            .map(String::as_str)
+            != Some("v2")
+    {
+        return Err("identity_mismatch");
+    }
     // Installation-owned assertion: use the managed Envoy profile and prohibit
     // direct/unmanaged ingress. Observations do not modify external resources.
     if entry
@@ -208,6 +236,8 @@ mod tests {
         let mut d: Deployment=serde_json::from_value(serde_json::json!({"metadata":{"generation":2},"spec":{"replicas":3,"selector":{"matchLabels":{"app":"synthetic"}},"template":{"spec":{"containers":[]}}},
             "status":{"observedGeneration":2,"readyReplicas":3,"updatedReplicas":3,"availableReplicas":3}})).unwrap();
         assert!(deployment_ready(&d, 3));
+        assert!(managed_ready(&d, 4, 1)); // Keep healthy old replicas during additive scaling.
+        assert!(!managed_ready(&d, 2, 1)); // Never treat an unapplied decrease as complete.
         d.status.as_mut().unwrap().updated_replicas = Some(2);
         assert!(!deployment_ready(&d, 3));
         d.status.as_mut().unwrap().updated_replicas = Some(3);

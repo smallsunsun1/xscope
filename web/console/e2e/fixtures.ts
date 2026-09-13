@@ -39,11 +39,13 @@ export type Backend = {
   sessionStatus: number;
   deploymentStatus: number;
   policyConflict: boolean;
+  platformAdmin: boolean;
+  billingReviewer: boolean;
 };
 
 export const test = base.extend<{ backend: Backend }>({
   backend: [async ({ context, page }, use) => {
-    const backend: Backend = { role: "owner", projects: [project], writes: [], errors: [], sessionStatus: 200, deploymentStatus: 200, policyConflict: false };
+    const backend: Backend = { role: "owner", projects: [project], writes: [], errors: [], sessionStatus: 200, deploymentStatus: 200, policyConflict: false, platformAdmin: true, billingReviewer: false };
     const attachErrors = (tab: Page) => {
       tab.on("pageerror", error => backend.errors.push(error.message));
     };
@@ -71,8 +73,10 @@ export const test = base.extend<{ backend: Backend }>({
         throw new Error(`Unmocked mutation: ${method} ${pathname}`);
       }
       if (pathname === "/healthz" || /\/components\/.+\/health$/.test(pathname)) return json({ status: "ok" });
+      if (pathname === "/admin/v1/capabilities") return json({ platform_admin: backend.platformAdmin, billing_reviewer: backend.billingReviewer, evidence_submission: true, alert_receiver_configured: true });
+      if (pathname === "/admin/v1/managed-pools" || pathname === "/admin/v1/clusters" || pathname === "/admin/v1/operations/alerts" || pathname === "/admin/v1/audit" || pathname.endsWith("/reviews")) return list([]);
       if (pathname === "/admin/v1/session") {
-        const session: Session = { username: "test-user", email: "test@example.com", memberships: [{ tenant_id: project.tenant_id, role: backend.role }] };
+        const session: Session = { id: "user-test", username: "test-user", email: "test@example.com", memberships: [{ tenant_id: project.tenant_id, role: backend.role }] };
         return json(backend.sessionStatus === 200 ? session : { error: { code: "unauthorized", message: "expired session" } }, backend.sessionStatus);
       }
       if (pathname === "/admin/v1/projects") return list(backend.projects);

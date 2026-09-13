@@ -20,6 +20,7 @@ pub struct Model {
     pub observed_at: Option<DateTimeWithTimeZone>,
     pub updated_at: DateTimeWithTimeZone,
     pub scale_operation: Option<Json>,
+    pub idle_requested_after: Option<String>,
 }
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}

@@ -1,6 +1,36 @@
 groups:
   - name: xscope-serving
     rules:
+      - alert: XScopeBusinessBackupFailed
+        expr: kube_job_status_failed{namespace="xscope-system",job_name=~"xscope-business-backup.*"} > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "A business backup job failed; incomplete archives are not restorable"
+      - alert: XScopeBusinessBackupStale
+        expr: (time() - kube_cronjob_status_last_successful_time{namespace="xscope-system",cronjob="xscope-business-backup"} > 93600) or ((time() - kube_cronjob_created{namespace="xscope-system",cronjob="xscope-business-backup"} > 93600) unless on(namespace,cronjob) kube_cronjob_status_last_successful_time{namespace="xscope-system",cronjob="xscope-business-backup"})
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "No successful scheduled business backup in over 26 hours; investigate before deleting any evidence"
+      - alert: XScopeOperationsMonitorDown
+        expr: up{job=~"xscope-state-metrics|xscope-alertmanager"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Operations monitoring is unavailable; missing data is not success"
+      - alert: XScopeBillingAdmissionOverload
+        expr: sum(increase(xscope_background_events_total{operation="billing_admit",outcome=~"queue_rejected|deadline_exceeded"}[5m])) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Billing admission queue rejected or timed out requests; inspect queue and database latency"
+      - alert: XScopeAlertDeliveryFailure
+        expr: sum(increase(alertmanager_notifications_failed_total{integration="webhook"}[5m])) > 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Alertmanager could not deliver console notifications; inspect receiver availability"
       - alert: XScopeTelemetryTargetDown
         expr: up{job=~"xscope|envoy|epp"} == 0
         for: 2m

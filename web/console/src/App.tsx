@@ -29,6 +29,7 @@ const ProjectsPage = lazy(() => import("./pages/ProjectsPage").then((module) => 
 const UsersPage = lazy(() => import("./pages/UsersPage").then((module) => ({ default: module.UsersPage })));
 const RoutingPage = lazy(() => import("./pages/RoutingPage").then((module) => ({ default: module.RoutingPage })));
 const ObservabilityPage = lazy(() => import("./pages/ObservabilityPage").then((module) => ({ default: module.ObservabilityPage })));
+const OperationsPage = lazy(() => import("./pages/OperationsPage").then((module) => ({ default: module.OperationsPage })));
 
 const { Content, Sider } = Layout;
 
@@ -42,6 +43,7 @@ const pageNames = () => ({
   billing: t("用量与计费"),
   users: t("用户与成员"),
   observability: t("监控与追踪"),
+  operations: t("运行与恢复"),
 } as const);
 
 type Page = keyof ReturnType<typeof pageNames>;
@@ -56,6 +58,7 @@ const menuItems = (): MenuProps["items"] => [
     { key: "routing", icon: <Layers3 size={18} />, label: t("流量路由") },
   ] },
   { type: "group", label: t("平台运营"), children: [
+    { key: "operations", icon: <Activity size={18} />, label: t("运行与恢复") },
     { key: "observability", icon: <Activity size={18} />, label: t("监控与追踪") },
     { key: "users", icon: <UsersRound size={18} />, label: t("用户与成员") },
     { key: "billing", icon: <ReceiptText size={18} />, label: t("用量与计费") },
@@ -138,6 +141,7 @@ export function ConsoleApp() {
     billing: <BillingPage />,
     users: <UsersPage />,
     observability: <ObservabilityPage />,
+    operations: <OperationsPage />,
   }[page];
   const accountName = session.data?.username || session.data?.email || t("平台用户");
   const accountEmail = session.data?.email || t("已通过 OIDC 登录");

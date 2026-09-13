@@ -13,7 +13,7 @@
 - `GET .../event-worker` 返回有界状态，不返回 lease token。空轮询和重复 ACK 无位置写入。未识别的财务事件保留原始事件并失败，不猜测其业务含义。
 - `xscope_event_worker_state{state,kind}` 的 jobs/backlog/oldest_seconds 为共享数据库视图；多控制面副本取 max，而不是 sum。请求/失败由 `xscope_background_events_total` 计数，label 不含客户 ID。
 
-短时 1 万账户/10 万事件探针用于验证只读空轮询，不代表千亿 token/天的生产容量。当前每个控制面数据库连接池上限四，消费者单循环；账号热点、数据库 IOPS、长期表增长和故障恢复窗口仍需真实负载压测。
+短时 1 万账户/10 万事件探针用于验证只读空轮询，不代表千亿 token/天的生产容量。当前每个控制面数据库连接池默认四（可配置），消费者单循环；账号热点、数据库 IOPS、长期表增长和故障恢复窗口仍需真实负载压测。
 
 ## 审计
 
@@ -29,7 +29,7 @@ Console 修改操作先持久化 `console.intent`，完成后记录 `console.com
 - 记录 5m/30m/1h/6h/30d 错误率、30 天剩余错误预算和慢首字节比例。
 - 14.4 倍的 1h+5m 快速燃尽、6 倍的 6h+30m 慢速燃尽，以及 HTTP 投递/消费者死信与积压/审计缺口/成员 NACK 告警。
 - `bazel run //tools:slo_rules_check` 使用实际 Prometheus promtool 验证健康、无样本、错误率、窗口和取消/4xx 排除。`bazel run //tools:deploy_observability_alerts` 只更新规则引用，保留 live scrape、TSDB 和 Grafana。
-- 告警通知接收目标尚未配置，规则加载不等于已发送短信/邮件/飞书通知。
+- 最新本地运维扩展已接通 Alertmanager → PostgreSQL 站内通知，详见 [可靠性与管理闭环](reliability-operations.md)。短信/邮件/飞书仍未配置，规则加载不等于这些外部渠道已发送。
 
 ## 推理 API
 

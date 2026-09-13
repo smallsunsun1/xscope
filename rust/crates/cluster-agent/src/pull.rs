@@ -19,6 +19,8 @@ const DIGEST: &str = "platform.xscope.io/desired-sha256";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub prometheus_url: Option<String>,
     pub cluster_id: String,
     pub namespace: String,
     pub control_url: String,
@@ -41,6 +43,27 @@ impl Config {
         let config: Self = serde_json::from_slice(&bytes)
             .map_err(|_| anyhow::anyhow!("invalid cluster pull configuration"))?;
         validate_name(&config.cluster_id, true)?;
+        if let Some(base) = &config.prometheus_url {
+            let url =
+                reqwest::Url::parse(base).map_err(|_| anyhow::anyhow!("invalid Prometheus URL"))?;
+            if !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || (url.scheme() != "https"
+                    && !(config.allow_local_http
+                        && url.scheme() == "http"
+                        && url.host_str().is_some_and(|h| {
+                            h == "localhost"
+                                || h.ends_with(".svc")
+                                || h.ends_with(".svc.cluster.local")
+                                || h.parse::<std::net::IpAddr>()
+                                    .is_ok_and(|ip| ip.is_loopback())
+                        })))
+            {
+                bail!("Prometheus requires HTTPS or explicitly allowed cluster-local HTTP");
+            }
+        }
         validate_name(&config.namespace, true)?;
         let url = reqwest::Url::parse(&config.control_url)
             .map_err(|_| anyhow::anyhow!("invalid control URL"))?;
@@ -239,6 +262,34 @@ async fn response(mut response: reqwest::Response) -> Result<Value> {
     }
     serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid member response"))
 }
+async fn provider_idle(
+    http: &reqwest::Client,
+    base: &str,
+    namespace: &str,
+    service: &str,
+    after: &str,
+) -> bool {
+    let Ok(query) = xscope_kubernetes::gateway_proof::idle_query(namespace, service, after) else {
+        return false;
+    };
+    let Ok(mut url) = reqwest::Url::parse(&format!("{}/api/v1/query", base.trim_end_matches('/')))
+    else {
+        return false;
+    };
+    url.query_pairs_mut().append_pair("query", &query);
+    let Ok(result) = http.get(url).send().await else {
+        return false;
+    };
+    let Ok(value) = response(result).await else {
+        return false;
+    };
+    value["status"] == "success"
+        && value["data"]["resultType"] == "vector"
+        && value["data"]["result"]
+            .as_array()
+            .is_some_and(|a| a.len() == 1 && a[0]["value"][1] == "0")
+}
+
 pub async fn run(client: Client, config: Config, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     use kube_leader_election::{LeaseLock, LeaseLockParams, LeaseLockResult};
     let lock = LeaseLock::new(
@@ -366,7 +417,7 @@ async fn run_active(
                 bail!("too many observation tasks");
             }
             for task in tasks {
-                let report = tokio::time::timeout(
+                let mut report = tokio::time::timeout(
                     Duration::from_secs(5),
                     xscope_kubernetes::observation::observe(
                         client.clone(),
@@ -377,6 +428,17 @@ async fn run_active(
                 )
                 .await
                 .map_err(|_| anyhow::anyhow!("observation deadline exceeded"))?;
+                if let (Some(after), Some(prometheus)) = (&task.idle_after, &config.prometheus_url)
+                {
+                    report.idle = provider_idle(
+                        &http,
+                        prometheus,
+                        &config.namespace,
+                        &task.serving_service,
+                        after,
+                    )
+                    .await;
+                }
                 let result = http
                     .post(format!("{base}/observations"))
                     .bearer_auth(&token)
@@ -385,6 +447,43 @@ async fn run_active(
                     .await
                     .map_err(|_| anyhow::anyhow!("member observation report unavailable"))?;
                 response(result).await?;
+            }
+            let result = http
+                .get(format!("{base}/gateway-proofs"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|_| anyhow::anyhow!("gateway proof tasks unavailable"))?;
+            if result.status() != reqwest::StatusCode::NOT_FOUND {
+                let value = response(result).await?;
+                let tasks: Vec<xscope_domain::traffic::GatewayProofTask> =
+                    serde_json::from_value(value["tasks"].clone())
+                        .map_err(|_| anyhow::anyhow!("invalid gateway proof tasks"))?;
+                if tasks.len() > 100 {
+                    bail!("too many gateway proof tasks");
+                }
+                for task in tasks {
+                    let proof = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        xscope_kubernetes::gateway_proof::observe(
+                            client.clone(),
+                            &http,
+                            &config.namespace,
+                            &task,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| anyhow::anyhow!("gateway proof deadline"))?;
+                    response(
+                        http.post(format!("{base}/gateway-proofs"))
+                            .bearer_auth(&token)
+                            .json(&proof)
+                            .send()
+                            .await
+                            .map_err(|_| anyhow::anyhow!("gateway proof report unavailable"))?,
+                    )
+                    .await?;
+                }
             }
             Ok(())
         }
@@ -435,6 +534,7 @@ mod tests {
     }
     fn config() -> Config {
         Config {
+            prometheus_url: None,
             cluster_id: "synthetic-cluster".into(),
             namespace: "synthetic-member".into(),
             control_url: "https://example.invalid".into(),

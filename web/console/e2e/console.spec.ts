@@ -10,6 +10,7 @@ const pages = [
   ["billing", "Billing & finance", "计费与财务"],
   ["users", "Users & memberships", "用户与成员"],
   ["observability", "From metrics to every request.", "从指标，到每一次请求。"],
+  ["operations", "Operations & recovery", "运行与恢复"],
 ] as const;
 
 test("all lazy pages switch in place and preserve the selected language on reload", async ({ page }, testInfo) => {

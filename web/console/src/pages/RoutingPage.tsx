@@ -5,6 +5,7 @@ import { useState } from "react";
 import { APIError, api, errorMessage } from "../api";
 import { PageHeader } from "../components";
 import type { Project, RoutePolicy, RoutePolicySpec } from "../types";
+import { ReleaseHistory } from "./ReleaseHistory";
 
 type Row = { project: Project; model: string; policy?: RoutePolicy };
 
@@ -17,6 +18,7 @@ export function RoutingPage() {
   const policies = useQuery({ queryKey: ["route-policies"], queryFn: api.routePolicies, refetchInterval: 10000 });
   const session = useQuery({ queryKey: ["session"], queryFn: api.session, retry: false });
   const [editing, setEditing] = useState<Row>();
+  const [history, setHistory] = useState<Row>();
   const [conflict, setConflict] = useState(false);
   const [form] = Form.useForm<RoutePolicySpec>();
   useLocalizedForm(form);
@@ -59,7 +61,7 @@ export function RoutingPage() {
 
   return <>
     <PageHeader eyebrow="TRAFFIC ROUTING" title={t("流量路由")} description={t("按项目选择模型版本，先用请求头验证，再逐步调整灰度比例。")} />
-    <Alert type="info" showIcon title={t("本地模型池使用 echo Runtime，不是 GPU 模型。池由部署配置注册；新建 ModelDeployment 尚不会自动接入。")} style={{ marginBottom: 20 }} />
+    <Alert type="info" showIcon title={t("新建 ModelDeployment 需绑定受管入口才会自动注册模型池；本地仍使用 Echo。")} style={{ marginBottom: 20 }} />
     {error && <Alert type="error" showIcon title={errorMessage(error)} action={<Button onClick={() => { projects.refetch(); pools.refetch(); policies.refetch(); }}>{t("重试")}</Button>} />}
     <section className="table-card">
       <Table<Row> rowKey={row => `${row.project.id}/${row.model}`} dataSource={rows}
@@ -70,9 +72,10 @@ export function RoutingPage() {
           { title: t("Canary 池"), render: (_, row) => row.policy?.spec.canary_pool ?? t("未启用") },
           { title: t("权重 / 请求头"), render: (_, row) => <Space orientation="vertical" size={2}><Tag color={row.policy?.spec.canary_percent ? "purple" : "default"}>Canary {row.policy?.spec.canary_percent ?? 0}%</Tag><small>{row.policy?.spec.headers.length ?? 0} {t(" 条规则优先匹配")}</small></Space> },
           { title: t("已保存版本"), render: (_, row) => row.policy ? `v${row.policy.revision}` : t("未配置") },
-          { title: t("操作"), render: (_, row) => <Tooltip title={canManage(row.project) ? "" : t("仅租户 owner 可以修改")}><Button disabled={!canManage(row.project) || !!error} onClick={() => edit(row)}>{t("配置策略")}</Button></Tooltip> },
+          { title: t("操作"), render: (_, row) => <Space><Tooltip title={canManage(row.project) ? "" : t("仅租户 owner 可以修改")}><Button disabled={!canManage(row.project) || !!error} onClick={() => edit(row)}>{t("配置策略")}</Button></Tooltip><Button disabled={!row.policy} onClick={() => setHistory(row)}>{t("发布历史")}</Button></Space> },
         ]} />
     </section>
+    <Drawer title={t("发布历史")} size={780} open={!!history} onClose={() => setHistory(undefined)} destroyOnHidden>{history?.policy && <ReleaseHistory key={`${history.project.id}/${history.model}`} policy={history.policy} canManage={!!canManage(history.project)} />}</Drawer>
     <Drawer title={t("流量策略 · {value0}", { value0: editing?.project.name ?? "" })} size={620} open={!!editing} onClose={() => !save.isPending && setEditing(undefined)} destroyOnHidden
       extra={<Popconfirm title={t("发布这份流量策略？")} description={t("新请求将在快照更新后使用新策略。")} onConfirm={() => form.submit()} disabled={conflict || save.isPending}>
         <Button type="primary" disabled={conflict} loading={save.isPending}>{t("发布流量策略")}</Button>

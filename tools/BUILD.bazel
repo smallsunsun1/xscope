@@ -1,6 +1,23 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@xscope_pypi//:requirements.bzl", "requirement")
 
+py_library(name = "ops_checks", srcs = ["ops_checks.py"], imports = ["."])
+py_library(name = "billing_load_checks", srcs = ["billing_load_checks.py"], imports = ["."])
+py_binary(name = "reliability_local", srcs = ["reliability_local.py"], data = ["business_backup.sh"], deps = [":safe_scaling_ops", ":observability_cluster", requirement("pyyaml"), "@rules_python//python/runfiles"])
+py_test(name = "reliability_config_test", srcs = ["reliability_config_test.py", "reliability_local.py"], deps = [":safe_scaling_ops", ":observability_cluster", requirement("pyyaml"), "@rules_python//python/runfiles"])
+py_library(name = "reliability_ops", srcs = ["reliability_local.py"], imports = ["."], deps = [":safe_scaling_ops", ":observability_cluster", requirement("pyyaml"), "@rules_python//python/runfiles"])
+py_binary(name = "reliability_check", srcs = ["reliability_check.py"], deps = [":reliability_ops", ":observability_cluster"])
+py_test(name = "backup_script_test", srcs = ["backup_script_test.py"], data = ["business_backup.sh"], deps = ["@rules_python//python/runfiles"], size = "medium", tags = ["external", "no-sandbox", "no-remote"], env_inherit = ["HOME", "DOCKER_HOST", "DOCKER_CONTEXT"])
+
+py_binary(
+    name = "safe_scaling_local",
+    srcs = ["safe_scaling_local.py"],
+    data = ["//deploy/inference:managed_envoy"],
+    deps = [":observability_cluster", "@rules_python//python/runfiles", requirement("pyyaml")],
+)
+py_library(name = "safe_scaling_ops", srcs = ["safe_scaling_local.py"], imports = ["."], deps = [":observability_cluster", "@rules_python//python/runfiles", requirement("pyyaml")])
+py_binary(name = "safe_scaling_check", srcs = ["safe_scaling_check.py"], deps = [":safe_scaling_ops", ":observability_cluster"])
+
 py_binary(
     name = "deploy_observability_alerts",
     srcs = ["deploy_observability_alerts.py"],
@@ -68,7 +85,7 @@ py_binary(
     srcs = ["billing_protocol_smoke.py"],
     args = ["$(rlocationpath //rust/crates/control-plane)", "$(rlocationpath //rust/crates/gateway)", "$(rlocationpath //rust/crates/cluster-agent)", "$(rlocationpath //rust/crates/payments:payment_fixture)"],
     data = ["//rust/crates/control-plane", "//rust/crates/gateway", "//rust/crates/cluster-agent", "//rust/crates/payments:payment_fixture"],
-    deps = [":billing_cursor_checks", ":billing_projection_checks", ":billing_review_checks", ":cluster_protocol_checks", ":cluster_pull_checks", ":event_worker_checks", ":payment_checks", ":model_catalog_checks", ":managed_traffic_checks", "@rules_python//python/runfiles"],
+    deps = [":billing_load_checks", ":ops_checks", ":billing_cursor_checks", ":billing_projection_checks", ":billing_review_checks", ":cluster_protocol_checks", ":cluster_pull_checks", ":event_worker_checks", ":payment_checks", ":model_catalog_checks", ":managed_traffic_checks", "@rules_python//python/runfiles"],
 )
 
 py_library(name = "model_catalog_checks", srcs = ["model_catalog_checks.py"], imports = ["."])

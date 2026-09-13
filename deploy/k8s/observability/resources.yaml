@@ -75,7 +75,7 @@ spec:
         - name: jaeger
           image: jaegertracing/jaeger:2.10.0@sha256:8c593d8048d86334eb52dba26633b6c846b8ecbe5c22905702c932ae97baeb42
           args: [--config=/etc/jaeger/jaeger.yaml]
-          env: [{ name: GOMAXPROCS, value: "1" }]
+          env: [{ name: GOMAXPROCS, value: "1" }, { name: GOMEMLIMIT, value: 512MiB }]
           ports:
             - { name: http, containerPort: 16686 }
             - { name: otlp-grpc, containerPort: 4317 }
@@ -83,8 +83,8 @@ spec:
           readinessProbe: { tcpSocket: { port: http } }
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true }
           resources:
-            requests: { cpu: 20m, memory: 64Mi }
-            limits: { cpu: 300m, memory: 256Mi }
+            requests: { cpu: 20m, memory: 128Mi }
+            limits: { cpu: 300m, memory: 768Mi }
           volumeMounts:
             - { name: config, mountPath: /etc/jaeger, readOnly: true }
             - { name: data, mountPath: /var/lib/jaeger }

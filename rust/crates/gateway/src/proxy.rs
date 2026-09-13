@@ -170,7 +170,7 @@ impl ProxyHttp for Gateway {
                 respond_json(
                     session,
                     200,
-                    serde_json::json!({"status":"ok","component":"gateway"}),
+                    serde_json::json!({"status":"ok","component":"gateway","session_id":self.keys.traffic.session_id}),
                     &ctx.request_id,
                 )
                 .await?;
@@ -528,6 +528,11 @@ impl ProxyHttp for Gateway {
         strip_serving_control_headers(request);
         if ctx.traffic_permit.is_some() {
             request.insert_header("x-xscope-managed-pool", &ctx.endpoint_id)?;
+            let (session, token) = self.keys.traffic.admission_headers().ok_or_else(|| {
+                Error::explain(ErrorType::HTTPStatus(503), "traffic authorization expired")
+            })?;
+            request.insert_header("x-xscope-traffic-session", session)?;
+            request.insert_header("x-xscope-traffic-token", token)?;
         }
         request.insert_header("x-request-id", &ctx.request_id)?;
         if let Some(trace) = &ctx.telemetry {

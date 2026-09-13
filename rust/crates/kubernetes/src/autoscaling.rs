@@ -72,14 +72,17 @@ pub struct KedaCondition {
 
 pub fn targets_model(target: &ScaleTargetRef, model: &ModelDeployment) -> bool {
     target.api_version == "platform.xscope.io/v1alpha1"
-        && target.kind == crate::recommendation::target_kind(model)
+        && matches!(target.kind.as_str(), "ModelDeployment" | "ModelScale")
         && target.name == model.name_any()
 }
 
 pub fn hpa_targets_model(hpa: &Hpa, model: &ModelDeployment) -> bool {
     hpa.spec.as_ref().is_some_and(|spec| {
         spec.scale_target_ref.api_version.as_deref() == Some("platform.xscope.io/v1alpha1")
-            && spec.scale_target_ref.kind == crate::recommendation::target_kind(model)
+            && matches!(
+                spec.scale_target_ref.kind.as_str(),
+                "ModelDeployment" | "ModelScale"
+            )
             && spec.scale_target_ref.name == model.name_any()
     })
 }
